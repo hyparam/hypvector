@@ -1,5 +1,5 @@
-import { asyncBufferFromFile, asyncBufferFromUrl, parquetMetadataAsync } from 'hyparquet'
-import { readVectors } from './readVectors.js'
+import { asyncBufferFromFile, asyncBufferFromUrl, parquetMetadataAsync, parquetRead } from 'hyparquet'
+import { defaultIdColumn, defaultVectorColumn } from './constants.js'
 import {
   cosineSimilarity,
   dotProduct,
@@ -9,15 +9,17 @@ import {
 
 /**
  * @import { SearchResult, SearchVectorsOptions, DistanceMetric } from './types.js'
- * @import { AsyncBuffer } from 'hyparquet'
+ * @import { AsyncBuffer, DecodedArray } from 'hyparquet'
  */
 
 /**
  * Find the top-k nearest neighbors to a query vector.
  *
- * Naive v0: linear scan over every stored vector. This streams rows from the
- * source parquet, computes the chosen similarity metric, and keeps a
- * top-k heap of the best results.
+ * Reads vector and id columns via parquetRead's onChunk callback so we avoid
+ * the per-row JS object materialization that parquetReadObjects pays. Within
+ * a row group, FIXED_LEN_BYTE_ARRAY decode hands us a Uint8Array[] backed by
+ * a single contiguous buffer; we score it via aligned Float32Array views
+ * with zero per-row allocations.
  *
  * @param {SearchVectorsOptions} options
  * @returns {Promise<SearchResult[]>}
@@ -41,18 +43,88 @@ export async function searchVectors({
     throw new Error(`query has dimension ${query.length}, file expects ${meta.dimension}`)
   }
   const usedMetric = metric ?? meta.metric
+  const dim = meta.dimension
+  const queryF32 = query instanceof Float32Array ? query : Float32Array.from(query)
 
-  /** @type {SearchResult[]} */
+  /** @type {{ rowIndex: number, score: number }[]} */
   const heap = []
-  let rowIndex = 0
+  /** @type {{ start: number, ids: string[] }[]} */
+  const idChunks = []
 
-  for await (const record of readVectors({ file, metadata, includeMetadata: true })) {
-    const score = computeScore(query, record.vector, usedMetric)
-    pushHeap(heap, { id: record.id, score, rowIndex, metadata: record.metadata }, topK, usedMetric)
-    rowIndex += 1
+  await parquetRead({
+    file,
+    metadata,
+    columns: [defaultIdColumn, defaultVectorColumn],
+    onChunk: ({ columnName, columnData, rowStart }) => {
+      if (columnName === defaultVectorColumn) {
+        scoreChunk(columnData, rowStart, dim, queryF32, usedMetric, heap, topK)
+      } else if (columnName === defaultIdColumn) {
+        idChunks.push({ start: rowStart, ids: /** @type {string[]} */ (columnData) })
+      }
+    },
+  })
+
+  const ordered = sortHeap(heap, usedMetric)
+  return ordered.map(({ rowIndex, score }) => ({
+    id: lookupId(idChunks, rowIndex),
+    score,
+    rowIndex,
+  }))
+}
+
+/**
+ * Score every row in a chunk and update the running top-k heap.
+ *
+ * @param {DecodedArray} columnData
+ * @param {number} rowStart
+ * @param {number} dim
+ * @param {Float32Array} query
+ * @param {DistanceMetric} metric
+ * @param {{ rowIndex: number, score: number }[]} heap
+ * @param {number} topK
+ */
+function scoreChunk(columnData, rowStart, dim, query, metric, heap, topK) {
+  const rows = /** @type {Uint8Array[]} */ (columnData)
+  if (rows.length === 0) return
+
+  // All rows in a chunk share a backing ArrayBuffer laid out contiguously.
+  // If the chunk start is 4-byte aligned, view it as one big Float32Array
+  // and stride by `dim`. Otherwise, copy each row into a reused scratch.
+  const first = rows[0]
+  if (first.byteOffset % 4 === 0) {
+    const flat = new Float32Array(first.buffer, first.byteOffset, rows.length * dim)
+    for (let i = 0; i < rows.length; i += 1) {
+      const offset = i * dim
+      const candidate = flat.subarray(offset, offset + dim)
+      const score = computeScore(query, candidate, metric)
+      pushHeap(heap, { rowIndex: rowStart + i, score }, topK, metric)
+    }
+    return
   }
 
-  return sortResults(heap, usedMetric)
+  const scratch = new Float32Array(dim)
+  const scratchBytes = new Uint8Array(scratch.buffer)
+  for (let i = 0; i < rows.length; i += 1) {
+    scratchBytes.set(rows[i])
+    const score = computeScore(query, scratch, metric)
+    pushHeap(heap, { rowIndex: rowStart + i, score }, topK, metric)
+  }
+}
+
+/**
+ * Find the id for a given row index within the collected id chunks.
+ *
+ * @param {{ start: number, ids: string[] }[]} chunks
+ * @param {number} rowIndex
+ * @returns {string | undefined}
+ */
+function lookupId(chunks, rowIndex) {
+  for (const { start, ids } of chunks) {
+    if (rowIndex >= start && rowIndex < start + ids.length) {
+      return ids[rowIndex - start]
+    }
+  }
+  return undefined
 }
 
 /**
@@ -73,8 +145,8 @@ function defaultAsyncBufferFactory({ url, signal }) {
 /**
  * Compute the score for a candidate vector under the chosen metric.
  *
- * @param {Float32Array | number[]} a
- * @param {Float32Array | number[]} b
+ * @param {Float32Array} a
+ * @param {Float32Array} b
  * @param {DistanceMetric} metric
  * @returns {number}
  */
@@ -87,7 +159,6 @@ function computeScore(a, b, metric) {
 
 /**
  * Return true if `a` is "better" than `b` under the metric.
- *
  * For cosine/dot, higher is better. For euclidean, lower is better.
  *
  * @param {number} a
@@ -104,8 +175,8 @@ function isBetter(a, b, metric) {
  * Naive bounded "heap": keep an unsorted array of at most topK items and
  * track the worst by linear scan. Plenty fast for v0 + small topK.
  *
- * @param {SearchResult[]} heap
- * @param {SearchResult} candidate
+ * @param {{ rowIndex: number, score: number }[]} heap
+ * @param {{ rowIndex: number, score: number }} candidate
  * @param {number} topK
  * @param {DistanceMetric} metric
  */
@@ -114,7 +185,6 @@ function pushHeap(heap, candidate, topK, metric) {
     heap.push(candidate)
     return
   }
-  // Find current worst entry
   let worstIdx = 0
   for (let i = 1; i < heap.length; i += 1) {
     if (isBetter(heap[worstIdx].score, heap[i].score, metric)) {
@@ -129,11 +199,11 @@ function pushHeap(heap, candidate, topK, metric) {
 /**
  * Sort results best-first under the chosen metric.
  *
- * @param {SearchResult[]} results
+ * @param {{ rowIndex: number, score: number }[]} results
  * @param {DistanceMetric} metric
- * @returns {SearchResult[]}
+ * @returns {{ rowIndex: number, score: number }[]}
  */
-function sortResults(results, metric) {
+function sortHeap(results, metric) {
   const dir = metric === 'euclidean' ? 1 : -1
   return results.slice().sort((a, b) => dir * (a.score - b.score))
 }
