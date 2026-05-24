@@ -1,4 +1,4 @@
-import { parquetWrite } from 'hyparquet-writer'
+import { parquetWrite, schemaFromColumnData } from 'hyparquet-writer'
 import {
   defaultIdColumn,
   defaultRowGroupSize,
@@ -9,14 +9,18 @@ import { l2Normalize, packFloat32 } from './utils.js'
 
 /**
  * @import { WriteVectorsOptions } from './types.js'
+ * @import { ColumnSource } from 'hyparquet-writer'
  */
 
 /**
  * Write embedding vectors to a parquet file.
  *
- * Naive v0 layout:
+ * v0 layout:
  *   - `id`: STRING (id of each vector, coerced to string)
- *   - `vector`: BYTE_ARRAY (raw little-endian float32 bytes, length = 4 * dimension)
+ *   - `vector`: FIXED_LEN_BYTE_ARRAY(4 * dimension) (raw little-endian float32 bytes)
+ *
+ * FIXED_LEN_BYTE_ARRAY avoids the 4-byte length prefix that BYTE_ARRAY writes
+ * per row, and lets readers/writers know the row width up-front.
  *
  * Metadata about the format is stored in parquet KV metadata so readers can
  * unpack vectors without out-of-band coordination.
@@ -59,13 +63,28 @@ export async function writeVectors({
     { key: 'hypvector.count', value: String(ids.length) },
   ]
 
+  /** @type {ColumnSource[]} */
+  const columnData = [
+    { name: defaultIdColumn, data: ids },
+    { name: defaultVectorColumn, data: packed },
+  ]
+  const schema = schemaFromColumnData({
+    columnData: [{ ...columnData[0], type: 'STRING' }, columnData[1]],
+    schemaOverrides: {
+      [defaultVectorColumn]: {
+        name: defaultVectorColumn,
+        type: 'FIXED_LEN_BYTE_ARRAY',
+        type_length: dimension * 4,
+        repetition_type: 'REQUIRED',
+      },
+    },
+  })
+
   await parquetWrite({
     writer,
+    schema,
     rowGroupSize,
     kvMetadata,
-    columnData: [
-      { name: defaultIdColumn, data: ids, type: 'STRING' },
-      { name: defaultVectorColumn, data: packed, type: 'BYTE_ARRAY' },
-    ],
+    columnData,
   })
 }

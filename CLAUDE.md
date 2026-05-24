@@ -25,7 +25,7 @@ npm run benchmark   # write + search benchmark
 Vectors are stored in a single Parquet file with two columns:
 
 - `id` (STRING) — caller-supplied identifier, coerced to string
-- `vector` (BYTE_ARRAY) — raw little-endian float32 bytes; length is always `4 * dimension`
+- `vector` (FIXED_LEN_BYTE_ARRAY, `type_length = 4 * dimension`) — raw little-endian float32 bytes
 
 Format-level info lives in Parquet KV metadata so readers don't need out-of-band coordination:
 
@@ -48,7 +48,7 @@ Format-level info lives in Parquet KV metadata so readers don't need out-of-band
 - **Linear scan only** — no ANN index, no partitioning, no inverted lists.
 - **Full file read for search** — every query reads the entire `vector` column.
 - **No quantization** — float32 only; int8 / binary / product quantization are future experiments.
-- **`BYTE_ARRAY` per row** — has per-value length overhead. `FIXED_LEN_BYTE_ARRAY` would be tighter; not all hyparquet-writer paths support it yet.
+- **PLAIN encoding** — no `BYTE_STREAM_SPLIT` or other float-friendly encoding yet.
 - **No batching API** — `writeVectors` materializes all packed bytes before writing.
 
 These are intentional starting points; each one is a candidate for a future experiment.

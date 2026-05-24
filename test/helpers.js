@@ -1,3 +1,8 @@
+import { mkdirSync } from 'node:fs'
+
+// Ensure the test scratch directory exists before any test writes to it.
+mkdirSync('test/files', { recursive: true })
+
 /**
  * Wraps an AsyncBuffer to count the number of fetches made.
  *

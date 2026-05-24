@@ -9,6 +9,7 @@ import {
 
 /**
  * @import { SearchResult, SearchVectorsOptions, DistanceMetric } from './types.js'
+ * @import { AsyncBuffer } from 'hyparquet'
  */
 
 /**
@@ -58,7 +59,7 @@ export async function searchVectors({
  * Default AsyncBuffer factory: uses node fs for local paths and HTTP fetch otherwise.
  *
  * @param {{ url: string, signal?: AbortSignal }} options
- * @returns {Promise<import('hyparquet').AsyncBuffer>}
+ * @returns {Promise<AsyncBuffer>}
  */
 function defaultAsyncBufferFactory({ url, signal }) {
   if (url.startsWith('http://') || url.startsWith('https://')) {

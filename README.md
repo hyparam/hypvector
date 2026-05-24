@@ -8,7 +8,7 @@ Store embedding vectors compactly in Parquet and query them directly over HTTP r
 
 Most vector databases require a server. HypVector treats a Parquet file on S3 (or local disk) as the database, so any client can run similarity search without infrastructure.
 
-This is the naive v0: each vector is stored as raw float32 bytes in a `BYTE_ARRAY` column, and search is a linear scan. Future versions will add quantization, ANN indexes, and partitioning.
+This is the naive v0: each vector is stored as raw float32 bytes in a `FIXED_LEN_BYTE_ARRAY` column, and search is a linear scan. Future versions will add quantization, ANN indexes, and partitioning.
 
 ## CLI usage
 
