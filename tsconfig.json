@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "lib": ["esnext", "dom"],
+    "module": "nodenext",
+    "noEmit": true,
+    "types": ["node"],
+    "resolveJsonModule": true,
+    "strict": true
+  },
+  "include": ["bin", "src", "test"]
+}

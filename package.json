@@ -1,0 +1,57 @@
+{
+  "name": "hypvector",
+  "version": "0.1.0",
+  "author": "Hyperparam",
+  "homepage": "https://hyperparam.app",
+  "license": "MIT",
+  "keywords": [
+    "parquet",
+    "vector",
+    "embedding",
+    "similarity-search",
+    "ann",
+    "hyparquet",
+    "serverless"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hyparam/hypvector.git"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "bin": {
+    "hypvector": "./bin/cli.js"
+  },
+  "types": "src/index.d.ts",
+  "main": "src/index.js",
+  "export": {
+    ".": {
+      "import": "./src/index.js",
+      "types": "./src/index.d.ts"
+    }
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "scripts": {
+    "benchmark": "node benchmark.js",
+    "coverage": "vitest run --coverage --coverage.include=src",
+    "lint": "eslint",
+    "lint:fix": "eslint --fix",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "hyparquet": "1.26.0",
+    "hyparquet-compressors": "1.1.1",
+    "hyparquet-writer": "0.15.1"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.1",
+    "@vitest/coverage-v8": "4.1.7",
+    "eslint": "9.39.4",
+    "eslint-plugin-jsdoc": "63.0.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.7"
+  }
+}
