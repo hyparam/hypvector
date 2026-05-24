@@ -37,6 +37,8 @@
   "scripts": {
     "benchmark": "node benchmark.js",
     "coverage": "vitest run --coverage --coverage.include=src",
+    "data:download": "node scripts/download.js",
+    "data:embed": "node scripts/embed.js",
     "lint": "eslint",
     "lint:fix": "eslint --fix",
     "test": "vitest run"
