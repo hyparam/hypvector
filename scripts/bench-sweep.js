@@ -60,6 +60,7 @@ function instrument(buf) {
 
 /**
  * @param {{ probe?: number, rerankFactor?: number, label: string }} opts
+ * @returns {Promise<{ label: string, avgMs: number, avgBytes: number, avgFetches: number, tops: string[][] }>}
  */
 async function run({ label, ...opts }) {
   const times = []
@@ -88,7 +89,15 @@ async function run({ label, ...opts }) {
   }
 }
 
-/** @param {number[]} a */ function avg(a) { return a.reduce((s, t) => s + t, 0) / a.length }
+/**
+ * @param {number[]} a
+ * @returns {number}
+ */
+function avg(a) {
+  let s = 0
+  for (let i = 0; i < a.length; i += 1) s += a[i]
+  return s / a.length
+}
 
 const exact = await run({ label: 'Exact', rerankFactor: 0 })
 console.log(`\n${'config'.padEnd(28)} ${'ms'.padStart(7)} ${'fetches'.padStart(8)} ${'MB read'.padStart(10)} ${'% bytes'.padStart(9)} ${'recall'.padStart(8)}`)

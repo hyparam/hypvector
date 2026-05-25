@@ -3,8 +3,8 @@ import { binaryKMeans, reorderClustersByHamming } from './cluster.js'
 import {
   defaultBinaryColumn,
   defaultBinaryPageSize,
-  defaultClusteredRowGroupSize,
   defaultClusterIterations,
+  defaultClusteredRowGroupSize,
   defaultIdColumn,
   defaultRowGroupSize,
   defaultVectorColumn,

@@ -136,10 +136,17 @@ async function runSearchSuite(label, opts) {
     fetchesPer.push(raw.fetches)
     tops.push(results.map(r => String(r.id)))
   }
-  const avgMs = times.reduce((s, t) => s + t, 0) / times.length
-  const avgBytes = bytesPer.reduce((s, t) => s + t, 0) / bytesPer.length
-  const avgFetches = fetchesPer.reduce((s, t) => s + t, 0) / fetchesPer.length
-  return { label, avgMs, avgBytes, avgFetches, tops }
+  let sMs = 0; let sBytes = 0; let sFetches = 0
+  for (let i = 0; i < times.length; i += 1) {
+    sMs += times[i]; sBytes += bytesPer[i]; sFetches += fetchesPer[i]
+  }
+  return {
+    label,
+    avgMs: sMs / times.length,
+    avgBytes: sBytes / times.length,
+    avgFetches: sFetches / times.length,
+    tops,
+  }
 }
 
 console.log('\n=== Search ===')

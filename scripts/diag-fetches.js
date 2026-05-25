@@ -76,7 +76,9 @@ for (const f of fetches) {
   grouped.get(k).bytes += size
 }
 
-console.log(`\nTotal: ${fetches.length} fetches, ${fetches.reduce((s, f) => s + (f.end - f.start), 0)} bytes`)
+let totalBytes = 0
+for (const f of fetches) totalBytes += f.end - f.start
+console.log(`\nTotal: ${fetches.length} fetches, ${totalBytes} bytes`)
 console.log('\nBy column:')
 for (const [k, v] of grouped) {
   console.log(`  ${k.padEnd(30)} ${v.count.toString().padStart(4)} fetches  ${(v.bytes / 1024).toFixed(1).padStart(8)} KB`)

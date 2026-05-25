@@ -109,7 +109,16 @@ async function bench(path, extra) {
     ms: avg(times), mb: avg(bytesA) / 1e6, fetches: avg(fetchesA), tops,
   }
 }
-const avg = a => a.reduce((s, t) => s + t, 0) / a.length
+
+/**
+ * @param {number[]} a
+ * @returns {number}
+ */
+function avg(a) {
+  let s = 0
+  for (let i = 0; i < a.length; i += 1) s += a[i]
+  return s / a.length
+}
 
 // Reference top-10 = exact full scan on base file
 const ref = await bench(variants[0].path, { rerankFactor: 0 })

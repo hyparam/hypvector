@@ -78,7 +78,9 @@ try {
       await searchVectors({ url, query: q, topK: 10, sourceFile: cached, sourceMetadata: metadata, ...opts })
       times.push(performance.now() - start)
     }
-    return times.reduce((s, t) => s + t, 0) / times.length
+    let sum = 0
+    for (let i = 0; i < times.length; i += 1) sum += times[i]
+    return sum / times.length
   }
 
   const exact = await bench({ rerankFactor: 0 })

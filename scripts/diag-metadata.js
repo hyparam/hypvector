@@ -29,9 +29,10 @@ const footerLen = metadata.metadata_length
 console.log(`\nFooter (FileMetaData thrift): ${(footerLen / 1024).toFixed(1)} KB`)
 
 // KV metadata
-const kvBytes = (metadata.key_value_metadata ?? []).reduce(
-  (s, kv) => s + kv.key.length + (kv.value?.length ?? 0), 0,
-)
+let kvBytes = 0
+for (const kv of metadata.key_value_metadata ?? []) {
+  kvBytes += kv.key.length + (kv.value?.length ?? 0)
+}
 console.log(`KV metadata payload: ${(kvBytes / 1024).toFixed(1)} KB`)
 for (const kv of metadata.key_value_metadata ?? []) {
   console.log(`  ${kv.key.padEnd(28)} ${(kv.value?.length ?? 0).toLocaleString()} bytes`)

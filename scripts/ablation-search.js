@@ -67,8 +67,17 @@ async function bench(searchFn) {
     times.push(performance.now() - start)
     bytes.push(raw.bytes); fetches.push(raw.fetches); tops.push(r.map(x => String(x.id)))
   }
-  const avg = a => a.reduce((s, t) => s + t, 0) / a.length
   return { ms: avg(times), mb: avg(bytes) / 1e6, fetches: avg(fetches), tops }
+}
+
+/**
+ * @param {number[]} a
+ * @returns {number}
+ */
+function avg(a) {
+  let s = 0
+  for (let i = 0; i < a.length; i += 1) s += a[i]
+  return s / a.length
 }
 
 // E1: baseline using the current searchVectors
@@ -82,6 +91,11 @@ const E2 = await bench(async (q, cached) => searchAblated(q, cached, { coalesce:
 // E3: same as E1 but ids fetched in phase 2 alongside vectors.
 const E3 = await bench(async (q, cached) => searchAblated(q, cached, { coalesce: true, deferId: false }))
 
+/**
+ * @param {string[][]} ref
+ * @param {string[][]} cand
+ * @returns {number}
+ */
 function recall(ref, cand) {
   let hits = 0; let total = 0
   for (let q = 0; q < ref.length; q += 1) {
@@ -105,6 +119,7 @@ console.log(`${'E3) -deferId (id in phase 2)'.padEnd(34)} ${E3.ms.toFixed(1).pad
  * @param {Float32Array} query
  * @param {AsyncBuffer} file
  * @param {{ coalesce: boolean, deferId: boolean }} opts
+ * @returns {Promise<{ id: string, score: number, rowIndex: number }[]>}
  */
 async function searchAblated(query, file, opts) {
   const dim = meta.dimension
