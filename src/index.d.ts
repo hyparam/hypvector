@@ -6,6 +6,16 @@ import type {
   WriteVectorsOptions,
 } from './types.js'
 
+export type {
+  DistanceMetric,
+  HypVectorMetadata,
+  ReadVectorsOptions,
+  SearchResult,
+  SearchVectorsOptions,
+  VectorRecord,
+  WriteVectorsOptions,
+} from './types.js'
+
 export const hypVectorVersion: number
 
 /**
