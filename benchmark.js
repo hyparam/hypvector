@@ -6,7 +6,7 @@ import { searchVectors } from './src/searchVectors.js'
 import { parseKvMetadata } from './src/utils.js'
 import { writeVectors } from './src/writeVectors.js'
 
-const REAL_FILE = 'data/wiki_en.vectors.parquet'
+const REAL_FILE = process.argv[2] ?? 'data/wiki_en.vectors.parquet'
 const SYNTHETIC_FILE = 'bench.parquet'
 const SYNTHETIC_COUNT = 50000
 const SYNTHETIC_DIMENSION = 384
