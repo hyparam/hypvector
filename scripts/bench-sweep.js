@@ -87,15 +87,16 @@ console.log('-'.repeat(75))
 console.log(`${exact.label.padEnd(28)} ${exact.avgMs.toFixed(1).padStart(7)} ${exact.avgFetches.toFixed(0).padStart(8)} ${(exact.avgBytes / 1e6).toFixed(2).padStart(10)} ${'100.0'.padStart(8)}% ${'—'.padStart(8)}`)
 
 const configs = [
-  { label: 'Rerank no-skip', rerankFactor: 10, probe: 1.0 },
-  { label: 'Rerank probe=0.5', rerankFactor: 10, probe: 0.5 },
-  { label: 'Rerank probe=0.25', rerankFactor: 10, probe: 0.25 },
-  { label: 'Rerank probe=0.1', rerankFactor: 10, probe: 0.1 },
-  { label: 'Rerank probe=0.05', rerankFactor: 10, probe: 0.05 },
-  { label: 'Rerank probe=0.02', rerankFactor: 10, probe: 0.02 },
-  { label: 'Rerank probe=0.1 rrx20', rerankFactor: 20, probe: 0.1 },
-  { label: 'Rerank probe=0.05 rrx20', rerankFactor: 20, probe: 0.05 },
-  { label: 'Rerank probe=0.05 rrx50', rerankFactor: 50, probe: 0.05 },
+  { label: 'probe=1.0  rrx10', rerankFactor: 10, probe: 1.0 },
+  { label: 'probe=0.5  rrx10', rerankFactor: 10, probe: 0.5 },
+  { label: 'probe=0.25 rrx10', rerankFactor: 10, probe: 0.25 },
+  { label: 'probe=0.1  rrx10', rerankFactor: 10, probe: 0.1 },
+  { label: 'probe=0.05 rrx10', rerankFactor: 10, probe: 0.05 },
+  { label: 'probe=0.25 rrx30', rerankFactor: 30, probe: 0.25 },
+  { label: 'probe=0.1  rrx30', rerankFactor: 30, probe: 0.1 },
+  { label: 'probe=0.1  rrx50', rerankFactor: 50, probe: 0.1 },
+  { label: 'probe=0.05 rrx50', rerankFactor: 50, probe: 0.05 },
+  { label: 'probe=0.05 rrx100', rerankFactor: 100, probe: 0.05 },
 ]
 
 for (const cfg of configs) {
