@@ -125,7 +125,7 @@ async function bench(path) {
     const cached = cachedAsyncBuffer(wrapped)
     const t = performance.now()
     await searchVectors({
-      url: path, query: q, topK: 10, sourceFile: cached, sourceMetadata: md, compressors: readCompressors,
+      source: cached, metadata: md, query: q, topK: 10, compressors: readCompressors,
     })
     times.push(performance.now() - t)
   }

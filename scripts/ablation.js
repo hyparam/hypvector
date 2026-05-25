@@ -101,7 +101,7 @@ async function bench(path, extra) {
     const raw = instrument(await asyncBufferFromFile(path))
     const cached = cachedAsyncBuffer(raw)
     const start = performance.now()
-    const r = await searchVectors({ url: path, query: q, topK: 10, sourceFile: cached, ...extra })
+    const r = await searchVectors({ source: cached, query: q, topK: 10, ...extra })
     times.push(performance.now() - start)
     bytesA.push(raw.bytes); fetchesA.push(raw.fetches); tops.push(r.map(x => String(x.id)))
   }

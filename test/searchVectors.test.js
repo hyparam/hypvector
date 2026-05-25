@@ -22,7 +22,7 @@ describe('searchVectors', () => {
 
     const target = vectors[42]
     const results = await searchVectors({
-      url: TEST_FILE,
+      source: TEST_FILE,
       query: target.vector,
       topK: 5,
     })
@@ -51,7 +51,7 @@ describe('searchVectors', () => {
     })
 
     const results = await searchVectors({
-      url: TEST_FILE,
+      source: TEST_FILE,
       query: [1, 0, 0, 0],
       topK: 3,
       metric: 'euclidean',
@@ -75,9 +75,8 @@ describe('searchVectors', () => {
 
     const target = vectors[77]
     const results = await searchVectors({
-      url: TEST_FILE,
-      sourceFile: file,
-      sourceMetadata: metadata,
+      source: file,
+      metadata,
       query: target.vector,
       topK: 5,
     })
@@ -100,10 +99,10 @@ describe('searchVectors', () => {
     // Probe with a random stored vector — its own row should be top-1 either way.
     const probe = vectors[42].vector
     const exact = await searchVectors({
-      url: TEST_FILE, sourceFile: file, sourceMetadata: metadata, query: probe, topK: 3, rerankFactor: 0,
+      source: file, metadata, query: probe, topK: 3, rerankFactor: 0,
     })
     const rerank = await searchVectors({
-      url: TEST_FILE, sourceFile: file, sourceMetadata: metadata, query: probe, topK: 3, rerankFactor: 10,
+      source: file, metadata, query: probe, topK: 3, rerankFactor: 10,
     })
     expect(exact[0].id).toBe(rerank[0].id)
     expect(exact[0].score).toBeCloseTo(rerank[0].score, 4)

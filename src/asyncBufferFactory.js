@@ -10,18 +10,18 @@ import { asyncBufferFromFile, asyncBufferFromUrl, cachedAsyncBuffer } from 'hypa
  * the same byte range (footer, offset indexes, overlapping pages) are
  * served from memory.
  *
- * @param {{ url: string, signal?: AbortSignal }} options
+ * @param {{ source: string, signal?: AbortSignal }} options
  * @returns {Promise<AsyncBuffer>}
  */
-export async function defaultAsyncBufferFactory({ url, signal }) {
+export async function defaultAsyncBufferFactory({ source, signal }) {
   /** @type {AsyncBuffer} */
   let raw
-  if (url.startsWith('http://') || url.startsWith('https://')) {
+  if (source.startsWith('http://') || source.startsWith('https://')) {
     /** @type {RequestInit} */
     const requestInit = signal ? { signal } : {}
-    raw = await asyncBufferFromUrl({ url, requestInit })
+    raw = await asyncBufferFromUrl({ url: source, requestInit })
   } else {
-    raw = await asyncBufferFromFile(url)
+    raw = await asyncBufferFromFile(source)
   }
   return cachedAsyncBuffer(raw)
 }

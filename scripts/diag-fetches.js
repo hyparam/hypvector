@@ -63,7 +63,7 @@ const wrapped = {
 const cached = cachedAsyncBuffer(wrapped)
 
 const results = await searchVectors({
-  url: filename, query, topK: 10, sourceFile: cached, sourceMetadata: metadata, probe: 0.25,
+  source: cached, metadata, query, topK: 10, probe: 0.25,
 })
 
 // Group fetches by classification

@@ -75,7 +75,7 @@ try {
       const buf = await asyncBufferFromUrl({ url })
       const cached = cachedAsyncBuffer(buf)
       const start = performance.now()
-      await searchVectors({ url, query: q, topK: 10, sourceFile: cached, sourceMetadata: metadata, ...opts })
+      await searchVectors({ source: cached, metadata, query: q, topK: 10, ...opts })
       times.push(performance.now() - start)
     }
     let sum = 0

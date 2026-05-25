@@ -82,7 +82,7 @@ function avg(a) {
 
 // E1: baseline using the current searchVectors
 const E1 = await bench(async (q, cached) => searchVectors({
-  url: FILE, query: q, topK: 10, sourceFile: cached, sourceMetadata: metadata,
+  source: cached, metadata, query: q, topK: 10,
 }))
 
 // E2: same path but per-candidate (no run coalescing). Implemented inline.

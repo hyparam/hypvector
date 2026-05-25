@@ -72,8 +72,7 @@ async function run({ label, ...opts }) {
     const cached = cachedAsyncBuffer(raw)
     const start = performance.now()
     const results = await searchVectors({
-      url: filename, query: q, topK: 10,
-      sourceFile: cached, sourceMetadata: metadata, ...opts,
+      source: cached, metadata, query: q, topK: 10, ...opts,
     })
     times.push(performance.now() - start)
     bytesPer.push(raw.bytes)

@@ -25,20 +25,23 @@ import { l2Normalize, parseKvMetadata } from './utils.js'
  */
 export async function searchVectors({
   query,
-  url,
+  source,
+  metadata: providedMetadata,
   topK = 10,
   metric,
   rerankFactor = 10,
   probe,
   signal,
   asyncBufferFactory,
-  sourceFile,
-  sourceMetadata,
   compressors,
 }) {
-  const factory = asyncBufferFactory ?? defaultAsyncBufferFactory
-  const file = sourceFile ?? await factory({ url, signal })
-  const metadata = sourceMetadata ?? await parquetMetadataAsync(file)
+  if (source === undefined || source === null) {
+    throw new Error('searchVectors: `source` is required (URL, file path, or AsyncBuffer)')
+  }
+  const file = typeof source === 'string'
+    ? await (asyncBufferFactory ?? defaultAsyncBufferFactory)({ source, signal })
+    : source
+  const metadata = providedMetadata ?? await parquetMetadataAsync(file)
   const meta = parseKvMetadata(metadata)
 
   if (query.length !== meta.dimension) {

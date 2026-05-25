@@ -1,4 +1,4 @@
-import type { AsyncBuffer, asyncBufferFromUrl, CompressionCodec, Compressors, FileMetaData } from 'hyparquet'
+import type { AsyncBuffer, CompressionCodec, Compressors, FileMetaData } from 'hyparquet'
 import type { Writer } from 'hyparquet-writer'
 
 export type DistanceMetric = 'cosine' | 'dot' | 'euclidean'
@@ -34,7 +34,8 @@ export interface ReadVectorsOptions {
 
 export interface SearchVectorsOptions {
   query: Float32Array | number[] // the query vector
-  url: string // URL or file path to the source parquet file
+  source: string | AsyncBuffer // URL, file path, or an already-opened AsyncBuffer
+  metadata?: FileMetaData // optional pre-parsed parquet metadata; skips the footer fetch on every call. Reuse across queries for best throughput.
   topK?: number // number of nearest neighbors to return (default: 10)
   metric?: DistanceMetric // override the stored metric
 
@@ -62,9 +63,7 @@ export interface SearchVectorsOptions {
 
   // fetch options
   signal?: AbortSignal
-  asyncBufferFactory?: typeof asyncBufferFromUrl
-  sourceFile?: AsyncBuffer
-  sourceMetadata?: FileMetaData
+  asyncBufferFactory?: (options: { source: string, signal?: AbortSignal }) => Promise<AsyncBuffer> // only consulted when `source` is a string
   compressors?: Compressors
 }
 

@@ -136,7 +136,7 @@ import { searchVectors } from 'hypvector'
 const [{ data: queryVec }] = await extract(['how do neural networks learn?'], { pooling: 'mean', normalize: true })
 
 const results = await searchVectors({
-  url: 'https://example.com/vectors.parquet',
+  source: 'https://example.com/vectors.parquet', // URL, local file path, or an open AsyncBuffer
   query: queryVec,    // Float32Array of length `dimension`
   topK: 10,
   rerankFactor: 10,   // candidate pool = topK * rerankFactor (default 10). Set to 0 to force exact full scan.
@@ -149,8 +149,8 @@ for (const { id, score } of results) {
 ```
 
 - `metric: 'cosine' | 'dot' | 'euclidean'` overrides the metric stored in the file.
-- For local files, pass a file path as `url` (auto-detected) or supply your own `asyncBufferFactory`.
-- When no `sourceFile` is provided, the default factory wraps the buffer in `cachedAsyncBuffer` so repeated reads of the footer / offset indexes are served from memory.
+- `source` accepts a URL string, a local file path, or an already-opened `AsyncBuffer`. When a string is passed, the default factory wraps the buffer in `cachedAsyncBuffer` so repeated reads of the footer / offset indexes are served from memory.
+- For repeated queries against the same file, open the `AsyncBuffer` and parse `metadata` once, then pass both: `searchVectors({ source: file, metadata, query, ... })`. This skips the per-query footer fetch and metadata parse.
 
 ## File layout
 
