@@ -18,6 +18,8 @@ import { writeVectors } from '../src/writeVectors.js'
 const SRC = process.argv[2] ?? 'data/wiki_en.vectors.parquet'
 const DST = process.argv[3] ?? 'data/wiki_en.vectors.clustered.parquet'
 const CLUSTERS = parseInt(process.argv[4] ?? '128', 10)
+const PAGE_SIZE = process.argv[5] ? parseInt(process.argv[5], 10) : undefined
+const ROW_GROUP_SIZE = process.argv[6] ? parseInt(process.argv[6], 10) : undefined
 
 const srcStat = await fs.stat(SRC).catch(() => undefined)
 if (!srcStat) {
@@ -49,6 +51,8 @@ await writeVectors({
   normalize: meta.normalized,
   binary: true,
   clusters: CLUSTERS,
+  ...(PAGE_SIZE !== undefined ? { pageSize: PAGE_SIZE } : {}),
+  ...(ROW_GROUP_SIZE !== undefined ? { rowGroupSize: ROW_GROUP_SIZE } : {}),
   vectors: records,
 })
 

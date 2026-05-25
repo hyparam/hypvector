@@ -15,8 +15,10 @@ export const defaultIdColumn = 'id'
 
 // Default parquet page size (in bytes) when a binary column is written.
 // Smaller pages let useOffsetIndex fetch only the pages containing the
-// per-candidate rows in the rerank phase 2 scan.
-export const defaultBinaryPageSize = 64 * 1024
+// per-candidate rows in the rerank phase 2 scan. 32 KB empirically
+// minimizes bytes-read on a 384-dim wiki benchmark; smaller pages save
+// more on phase 2 but cost more on phase-1 page-header overhead.
+export const defaultBinaryPageSize = 32 * 1024
 
 // Default name of the cluster-id column when clustering is enabled.
 export const defaultClusterColumn = 'cluster_id'
