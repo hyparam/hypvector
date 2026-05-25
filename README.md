@@ -269,7 +269,7 @@ hypvector isn't a hosted service. The closest peers are:
 
 | Engine | Server? | Cold p50 | Warm p50 | Fixed $/mo |
 |---|---|---:|---:|---:|
-| **hypvector** | none — file on S3 | ~140 ms (HTTP) | same — no cache | $0 |
+| **hypvector** | none — file on S3 | ~500 ms (CloudFront, home WAN) | same — no cache | $0 |
 | **LanceDB** (S3 mode) | none — embedded | bandwidth-bound | sub-50 ms (local) | $0 |
 | **turbopuffer** | hosted | ~440 ms p90 | ~8 ms | $64 min |
 | **Pinecone Serverless** | hosted | 200 ms – 2 s | 50–100 ms | $0 + per-RU |

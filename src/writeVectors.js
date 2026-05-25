@@ -4,7 +4,6 @@ import {
   defaultBinaryColumn,
   defaultBinaryPageSize,
   defaultClusterIterations,
-  defaultClusteredRowGroupSize,
   defaultIdColumn,
   defaultRowGroupSize,
   defaultVectorColumn,
@@ -56,7 +55,6 @@ export async function writeVectors({
   }
 
   const effectivePageSize = pageSize ?? (binary ? defaultBinaryPageSize : undefined)
-  const effectiveRowGroupSize = rowGroupSize ?? (clusters > 0 ? defaultClusteredRowGroupSize : defaultRowGroupSize)
   const binaryBytes = dimension + 7 >> 3
 
   /** @type {string[]} */
@@ -163,6 +161,14 @@ export async function writeVectors({
   }
   const schemaInput = columnData.map(c => c.name === defaultIdColumn ? { ...c, type: /** @type {const} */ ('STRING') } : c)
   const schema = schemaFromColumnData({ columnData: schemaInput, schemaOverrides })
+
+  // When clustering, each cluster becomes its own row group so phase-1
+  // binary scans and phase-2 candidate fetches stay within a single column
+  // chunk per cluster — drops fetches roughly proportional to clusters
+  // probed. Caller-supplied rowGroupSize wins if explicitly passed.
+  const effectiveRowGroupSize = rowGroupSize ?? (
+    clusterCounts ? Array.from(clusterCounts) : defaultRowGroupSize
+  )
 
   await parquetWrite({
     writer,
