@@ -147,40 +147,104 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
 
   if (candidateHeap.length === 0) return []
 
-  // Phase 2: rerank float32 vectors for candidate row range.
+  // Phase 2: group candidates by row group, then do one parquetRead per group
+  // with a tight row range + useOffsetIndex. This pays the parquet-plan cost
+  // once per row group (small N) rather than once per candidate (K), while
+  // still letting the offset index skip pages outside the bounding range
+  // within each row group.
+  const rowGroupRanges = groupCandidatesByRowGroup(metadata, candidateHeap)
   const candidateSet = new Set(candidateHeap.map(c => c.rowIndex))
-  let minRow = Infinity
-  let maxRow = -1
-  for (const c of candidateHeap) {
-    if (c.rowIndex < minRow) minRow = c.rowIndex
-    if (c.rowIndex > maxRow) maxRow = c.rowIndex
-  }
+  const decoder = new TextDecoder()
 
-  /** @type {{ rowIndex: number, score: number }[]} */
-  const heap = []
-  /** @type {{ start: number, ids: string[] }[]} */
-  const idChunks = []
-
-  await parquetRead({
-    file,
-    metadata,
-    columns: [defaultIdColumn, defaultVectorColumn],
-    rowStart: minRow,
-    rowEnd: maxRow + 1,
-    onChunk: ({ columnName, columnData, rowStart }) => {
-      if (columnName === defaultVectorColumn) {
-        rerankVectorChunk(columnData, rowStart, dim, queryF32, scoringMetric, candidateSet, heap, topK)
-      } else if (columnName === defaultIdColumn) {
-        idChunks.push({ start: rowStart, ids: /** @type {string[]} */ (columnData) })
-      }
-    },
-  })
-
-  return sortHeap(heap, reportedMetric).map(({ rowIndex, score }) => ({
-    id: lookupId(idChunks, rowIndex) ?? String(rowIndex),
-    score,
-    rowIndex,
+  const perGroup = await Promise.all(rowGroupRanges.map(async ({ rowStart, rowEnd }) => {
+    /** @type {{ rowIndex: number, score: number, id: string }[]} */
+    const local = []
+    /** @type {{ start: number, ids: any[] } | null} */
+    let idChunk = null
+    /** @type {{ start: number, rows: Uint8Array[] } | null} */
+    let vecChunk = null
+    await parquetRead({
+      file,
+      metadata,
+      columns: [defaultIdColumn, defaultVectorColumn],
+      rowStart,
+      rowEnd,
+      useOffsetIndex: true,
+      onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
+        if (columnName === defaultIdColumn) {
+          idChunk = { start: chunkStart, ids: /** @type {any[]} */ (columnData) }
+        } else if (columnName === defaultVectorColumn) {
+          vecChunk = { start: chunkStart, rows: /** @type {Uint8Array[]} */ (columnData) }
+        }
+        if (!idChunk || !vecChunk || idChunk.start !== vecChunk.start) return
+        const { start, rows } = vecChunk
+        const { ids } = idChunk
+        for (let i = 0; i < rows.length; i += 1) {
+          const rowIndex = start + i
+          if (!candidateSet.has(rowIndex)) continue
+          const bytes = rows[i]
+          /** @type {Float32Array} */
+          let vector
+          if (bytes.byteOffset % 4 === 0) {
+            vector = new Float32Array(bytes.buffer, bytes.byteOffset, dim)
+          } else {
+            vector = new Float32Array(dim)
+            new Uint8Array(vector.buffer).set(bytes)
+          }
+          const rawId = ids[i]
+          const id = typeof rawId === 'string' ? rawId : decoder.decode(rawId)
+          local.push({ rowIndex, id, score: computeScore(queryF32, vector, scoringMetric) })
+        }
+        // Reset so subsequent paired chunks within the same group are handled.
+        idChunk = null
+        vecChunk = null
+      },
+    })
+    return local
   }))
+
+  const valid = perGroup.flat()
+  const dir = reportedMetric === 'euclidean' ? 1 : -1
+  valid.sort((a, b) => dir * (a.score - b.score))
+  return valid.slice(0, topK).map(({ id, score, rowIndex }) => ({ id, score, rowIndex }))
+}
+
+/**
+ * Group candidate row indices by which Parquet row group contains them, and
+ * return a tight rowStart..rowEnd range per row group.
+ *
+ * @param {FileMetaData} metadata
+ * @param {{ rowIndex: number }[]} candidates
+ * @returns {{ rowStart: number, rowEnd: number }[]}
+ */
+function groupCandidatesByRowGroup(metadata, candidates) {
+  // Precompute row group boundaries.
+  /** @type {{ start: number, end: number }[]} */
+  const boundaries = []
+  let cursor = 0
+  for (const rg of metadata.row_groups) {
+    const numRows = Number(rg.num_rows)
+    boundaries.push({ start: cursor, end: cursor + numRows })
+    cursor += numRows
+  }
+  /** @type {Map<number, { min: number, max: number }>} */
+  const perGroup = new Map()
+  for (const c of candidates) {
+    // Find row group via simple linear scan (typically <100 groups).
+    for (let g = 0; g < boundaries.length; g += 1) {
+      const b = boundaries[g]
+      if (c.rowIndex >= b.start && c.rowIndex < b.end) {
+        const cur = perGroup.get(g)
+        if (!cur) perGroup.set(g, { min: c.rowIndex, max: c.rowIndex })
+        else {
+          if (c.rowIndex < cur.min) cur.min = c.rowIndex
+          if (c.rowIndex > cur.max) cur.max = c.rowIndex
+        }
+        break
+      }
+    }
+  }
+  return Array.from(perGroup.values()).map(({ min, max }) => ({ rowStart: min, rowEnd: max + 1 }))
 }
 
 /**
@@ -211,42 +275,6 @@ function scoreVectorChunk(columnData, rowStart, dim, query, metric, heap, topK) 
   for (let i = 0; i < rows.length; i += 1) {
     scratchBytes.set(rows[i])
     pushHeap(heap, { rowIndex: rowStart + i, score: computeScore(query, scratch, metric) }, topK, metric)
-  }
-}
-
-/**
- * Score only the rows of a vector chunk that are in the candidate set.
- *
- * @param {DecodedArray} columnData
- * @param {number} rowStart
- * @param {number} dim
- * @param {Float32Array} query
- * @param {DistanceMetric} metric
- * @param {Set<number>} candidateSet
- * @param {{ rowIndex: number, score: number }[]} heap
- * @param {number} topK
- */
-function rerankVectorChunk(columnData, rowStart, dim, query, metric, candidateSet, heap, topK) {
-  const rows = /** @type {Uint8Array[]} */ (columnData)
-  if (rows.length === 0) return
-  const first = rows[0]
-  const aligned = first.byteOffset % 4 === 0
-  const flat = aligned ? new Float32Array(first.buffer, first.byteOffset, rows.length * dim) : null
-  const scratch = aligned ? null : new Float32Array(dim)
-  const scratchBytes = scratch ? new Uint8Array(scratch.buffer) : null
-  for (let i = 0; i < rows.length; i += 1) {
-    const rowIndex = rowStart + i
-    if (!candidateSet.has(rowIndex)) continue
-    let candidate
-    if (flat) {
-      candidate = flat.subarray(i * dim, (i + 1) * dim)
-    } else if (scratchBytes && scratch) {
-      scratchBytes.set(rows[i])
-      candidate = scratch
-    } else {
-      continue
-    }
-    pushHeap(heap, { rowIndex, score: computeScore(query, candidate, metric) }, topK, metric)
   }
 }
 
