@@ -8,7 +8,7 @@ Store embedding vectors compactly in Parquet and query them directly over HTTP r
 
 Most vector databases require a server. HypVector treats a Parquet file on S3 (or local disk) as the database, so any client can run similarity search without infrastructure. The file is self-describing — query parameters (dimension, metric, normalization, cluster centroids) are stored in Parquet key-value metadata.
 
-At 100k 384-dim wiki embeddings (159 MB), a single top-10 query reads **~5.5 MB and ~100 ranged HTTP fetches** with ~94% recall against an exact full scan.
+At 100k 384-dim wiki embeddings (159 MB), a single top-10 query reads **~5 MB across ~80 ranged HTTP fetches** with ~91% recall against an exact full scan.
 
 ## How it works
 
@@ -18,7 +18,7 @@ Three columns: `id` (STRING), `vector` (`FIXED_LEN_BYTE_ARRAY(4 × dim)`, raw fl
 
 **Binary + cluster + rerank path** (default when `binary: true`):
 
-1. **Build-time clustering** (when `clusters > 0`): k-means on the 1-bit codes using Hamming distance and bit-majority voting. Rows are sorted by cluster id so each cluster spans a contiguous row range. Centroids and per-cluster row counts are written to KV metadata.
+1. **Build-time clustering** (when `clusters > 0`): k-means on the 1-bit codes using Hamming distance and bit-majority voting. Cluster ids are then renumbered via a greedy nearest-neighbor walk so that adjacent ids = similar centroids — this makes the top-N nearest clusters at query time tend to land in fewer contiguous row ranges. Rows are sorted by the new cluster id. Centroids and per-cluster row counts go into KV metadata.
 2. **Phase 1 — cluster pruning**: rank clusters by Hamming(query, centroid), pick the top `probe` fraction, and Hamming-scan only those clusters' row ranges. With 32 KB pages and `useOffsetIndex`, hyparquet fetches only the pages covering each cluster's rows.
 3. **Phase 2 — float32 rerank**: collect the top `topK × rerankFactor` candidate row indices, coalesce them into contiguous runs (merging gaps ≤ 64 rows), and issue one ranged `parquetRead` per run for the `vector` column only. Score under the exact metric.
 4. **Phase 3 — id lookup**: fetch the `id` column for *only* the top-K winners (the id column is variable-length and reading it for every candidate doubles phase-2 cost).
@@ -115,13 +115,13 @@ Key-value metadata:
 
 ## Performance (100k 384-dim wiki, local file)
 
-From `scripts/ablation.js`:
+From `scripts/ablation.js` (write-side optimizations):
 
 | Variant | File MB | Query ms | Fetches | MB read | Recall@10 |
 |---|---:|---:|---:|---:|---:|
-| base (`vector` + `id`) — forced exact scan | 154.5 | 69 | 21 | 155.0 | 100% |
-| `+ binary` (phase 1 + 2 rerank) | 159.5 | 36 | 108 | 8.7 | 95% |
-| `+ cluster` (default; `probe=0.25`, `clusters=128`) | 159.5 | 19 | 91 | 5.5 | 91% |
+| base (`vector` + `id`) — forced exact scan | 154.5 | 68 | 21 | 155.0 | 100% |
+| `+ binary` (phase 1 + 2 rerank) | 159.5 | 36 | 107 | 8.7 | 95% |
+| `+ cluster` (default; `probe=0.25`, `clusters=128`) | 159.5 | 16 | 79 | 5.2 | 91% |
 
 From `scripts/ablation-search.js` (same data, toggling search-side knobs):
 
@@ -130,3 +130,13 @@ From `scripts/ablation-search.js` (same data, toggling search-side knobs):
 | baseline (all opts on) | 22 | 100 | 5.5 |
 | `-coalesce` (one `parquetRead` per candidate) | 34 | 133 | 4.9 |
 | `-deferId` (fetch ids alongside vectors) | 50 | 117 | 5.8 |
+
+Trade query speed for recall via the `probe` knob (fraction of clusters scanned):
+
+| `probe` | ms | fetches | MB | recall |
+|---:|---:|---:|---:|---:|
+| 0.05 |  9 | 47 | 3.7 | 78% |
+| 0.10 | 11 | 59 | 4.2 | 84% |
+| 0.25 (default) | 16 | 79 | 5.2 | 91% |
+| 0.50 | 21 | 94 | 6.5 | 94% |
+| 1.00 (all clusters) | 29 | 70 | 8.3 | 94% |
