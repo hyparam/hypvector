@@ -41,6 +41,7 @@ export async function searchVectors({
   asyncBufferFactory,
   sourceFile,
   sourceMetadata,
+  compressors,
 }) {
   const factory = asyncBufferFactory ?? defaultAsyncBufferFactory
   const file = sourceFile ?? await factory({ url, signal })
@@ -62,11 +63,11 @@ export async function searchVectors({
 
   if (meta.hasBinary && rerankFactor > 0) {
     return searchRerank({
-      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe,
+      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe, compressors,
     })
   }
   return searchExact({
-    file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK,
+    file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, compressors,
   })
 }
 
@@ -81,9 +82,10 @@ export async function searchVectors({
  * @param {DistanceMetric} options.scoringMetric
  * @param {DistanceMetric} options.reportedMetric
  * @param {number} options.topK
+ * @param {import('hyparquet').Compressors} [options.compressors]
  * @returns {Promise<SearchResult[]>}
  */
-async function searchExact({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK }) {
+async function searchExact({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK, compressors }) {
   /** @type {{ rowIndex: number, score: number }[]} */
   const heap = []
   /** @type {{ start: number, ids: string[] }[]} */
@@ -92,6 +94,7 @@ async function searchExact({ file, metadata, meta, queryF32, scoringMetric, repo
   await parquetRead({
     file,
     metadata,
+    compressors,
     columns: [defaultIdColumn, defaultVectorColumn],
     onChunk: ({ columnName, columnData, rowStart }) => {
       if (columnName === defaultVectorColumn) {
@@ -126,9 +129,10 @@ async function searchExact({ file, metadata, meta, queryF32, scoringMetric, repo
  * @param {number} options.topK
  * @param {number} options.rerankFactor
  * @param {number | undefined} options.probe
+ * @param {import('hyparquet').Compressors} [options.compressors]
  * @returns {Promise<SearchResult[]>}
  */
-async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK, rerankFactor, probe }) {
+async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK, rerankFactor, probe, compressors }) {
   const dim = meta.dimension
   const binaryBytes = dim + 7 >> 3
   const candidatesK = Math.max(topK * rerankFactor, topK)
@@ -149,6 +153,7 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
   await Promise.all(scanRanges.map(({ rowStart, rowEnd }) => parquetRead({
     file,
     metadata,
+    compressors,
     columns: [defaultBinaryColumn],
     rowStart,
     rowEnd,
@@ -174,6 +179,7 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
     await parquetRead({
       file,
       metadata,
+      compressors,
       columns: [defaultVectorColumn],
       rowStart,
       rowEnd,
@@ -206,7 +212,7 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
   const winners = scored.slice(0, topK)
 
   // Phase 3: fetch ids for just the top-K winners.
-  const ids = await fetchIds(file, metadata, winners.map(w => w.rowIndex))
+  const ids = await fetchIds(file, metadata, winners.map(w => w.rowIndex), compressors)
   return winners.map((w, i) => ({ id: ids[i], score: w.score, rowIndex: w.rowIndex }))
 }
 
@@ -218,9 +224,10 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
  * @param {AsyncBuffer} file
  * @param {FileMetaData} metadata
  * @param {number[]} rowIndices
+ * @param {import('hyparquet').Compressors} [compressors]
  * @returns {Promise<string[]>}
  */
-async function fetchIds(file, metadata, rowIndices) {
+async function fetchIds(file, metadata, rowIndices, compressors) {
   if (rowIndices.length === 0) return []
   const sorted = [...new Set(rowIndices)].sort((a, b) => a - b)
   const wanted = new Set(sorted)
@@ -232,6 +239,7 @@ async function fetchIds(file, metadata, rowIndices) {
   await Promise.all(runs.map(({ rowStart, rowEnd }) => parquetRead({
     file,
     metadata,
+    compressors,
     columns: [defaultIdColumn],
     rowStart,
     rowEnd,
