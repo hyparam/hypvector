@@ -35,6 +35,66 @@ npx hypvector vectors.parquet
 
 Prints format version, vector count, dimension, metric, whether a binary column is present, cluster count, and storage overhead.
 
+## Producing vectors
+
+HypVector is BYO-embedding: you decide which model produces the vectors. It just stores `{ id, vector }` pairs and queries them. The only contracts are:
+
+1. **Same model on write and query.** Embeddings from different models aren't comparable.
+2. **Same `dimension`** for every record (must match the `dimension` you pass to `writeVectors`).
+3. **`normalize: true`** is the right default for any model whose vectors aren't already unit-length and you intend to query with cosine — it saves the per-candidate sqrt at query time. If your model already normalizes (most modern sentence-transformer models do), still pass `normalize: true` so the flag is recorded in KV metadata.
+
+The natural shape is an async generator that yields embedded records as you batch them through your embedder. Two end-to-end sketches:
+
+### Local model (Transformers.js)
+
+```javascript
+import { pipeline } from '@huggingface/transformers'
+import { fileWriter } from 'hyparquet-writer'
+import { writeVectors } from 'hypvector'
+
+const extract = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2')
+
+async function* embed(docs, batchSize = 32) {
+  for (let i = 0; i < docs.length; i += batchSize) {
+    const batch = docs.slice(i, i + batchSize)
+    const out = await extract(batch.map(d => d.text), { pooling: 'mean', normalize: true })
+    for (let j = 0; j < batch.length; j += 1) {
+      yield { id: batch[j].id, vector: out.data.slice(j * 384, (j + 1) * 384) }
+    }
+  }
+}
+
+await writeVectors({
+  writer: fileWriter('vectors.parquet'),
+  dimension: 384,
+  normalize: true,
+  binary: true,
+  clusters: 128,
+  vectors: embed(docs),
+})
+```
+
+### Remote API (OpenAI / Cohere / Voyage / etc.)
+
+```javascript
+async function* embed(docs, batchSize = 96) {
+  for (let i = 0; i < docs.length; i += batchSize) {
+    const batch = docs.slice(i, i + batchSize)
+    const res = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'text-embedding-3-small', input: batch.map(d => d.text) }),
+    })
+    const { data } = await res.json()
+    for (let j = 0; j < batch.length; j += 1) {
+      yield { id: batch[j].id, vector: Float32Array.from(data[j].embedding) }
+    }
+  }
+}
+```
+
+See `scripts/embed.js` for a working version that streams 156k wiki rows through MiniLM and writes the result.
+
 ## Write vectors
 
 ```javascript
@@ -48,10 +108,7 @@ await writeVectors({
   normalize: true,    // L2-normalize on write; lets search skip sqrt for cosine
   binary: true,       // also write 1-bit-per-dim sign column for binary+rerank search
   clusters: 128,      // k-means clusters for phase-1 pruning (implies binary: true)
-  vectors: [
-    { id: 'doc-1', vector: new Float32Array(384) /* ... */ },
-    { id: 'doc-2', vector: new Float32Array(384) /* ... */ },
-  ],
+  vectors: myEmbedder(), // any sync or async iterable of { id, vector }
 })
 ```
 
@@ -71,12 +128,16 @@ for await (const { id, vector } of readVectors({ file })) {
 
 ## Search
 
+Embed the query with the **same model** used at write time, then pass the resulting vector:
+
 ```javascript
 import { searchVectors } from 'hypvector'
 
+const [{ data: queryVec }] = await extract(['how do neural networks learn?'], { pooling: 'mean', normalize: true })
+
 const results = await searchVectors({
   url: 'https://example.com/vectors.parquet',
-  query: new Float32Array(384) /* ... */,
+  query: queryVec,    // Float32Array of length `dimension`
   topK: 10,
   rerankFactor: 10,   // candidate pool = topK * rerankFactor (default 10). Set to 0 to force exact full scan.
   probe: 0.25,        // fraction of clusters to scan in phase 1 (default 0.25). Set to 1 to scan all clusters; pass an integer > 1 for an absolute count.
