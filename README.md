@@ -8,7 +8,7 @@ Store embedding vectors compactly in Parquet and query them directly over HTTP r
 
 Most vector databases require a server. HypVector treats a Parquet file on S3 (or local disk) as the database, so any client can run similarity search without infrastructure. The file is self-describing — query parameters (dimension, metric, normalization, cluster centroids) are stored in Parquet key-value metadata.
 
-At 100k 384-dim wiki embeddings (159 MB), a single top-10 query reads **~5 MB across ~80 ranged HTTP fetches** with ~91% recall against an exact full scan.
+At 156k 384-dim wiki embeddings (249 MB), a single top-10 query reads **~6 MB across ~160 ranged HTTP fetches** with ~91% recall against an exact full scan. Over a localhost HTTP server with 20 ms of injected per-request latency, the rerank path lands at **~140 ms/query** vs ~360 ms for an exact full scan.
 
 ## How it works
 
@@ -113,15 +113,24 @@ Key-value metadata:
 | `hypvector.centroids` | base64-encoded centroid binary codes (`clusters × dim/8` bytes); present when `clusters > 0` |
 | `hypvector.clusterCounts` | base64-encoded `Uint32Array` of per-cluster row counts; present when `clusters > 0` |
 
-## Performance (100k 384-dim wiki, local file)
+## Performance (156k 384-dim wiki, local file)
 
 From `scripts/ablation.js` (write-side optimizations):
 
 | Variant | File MB | Query ms | Fetches | MB read | Recall@10 |
 |---|---:|---:|---:|---:|---:|
-| base (`vector` + `id`) — forced exact scan | 154.5 | 68 | 21 | 155.0 | 100% |
-| `+ binary` (phase 1 + 2 rerank) | 159.5 | 36 | 107 | 8.7 | 95% |
-| `+ cluster` (default; `probe=0.25`, `clusters=128`) | 159.5 | 16 | 79 | 5.2 | 91% |
+| base (`vector` + `id`) — forced exact scan | 241.5 | 108 | 33 | 242.0 | 100% |
+| `+ binary` (phase 1 + 2 rerank) | 249.3 | 48 | 136 | 11.7 | 93% |
+| `+ cluster` (default; `probe=0.25`, `clusters=128`) | 249.4 | 15 | 162 | 6.2 | 91% |
+
+From `scripts/bench-http.js` (localhost HTTP server with +20 ms per-request RTT, same 156k file):
+
+| Search | ms/query |
+|---|---:|
+| Exact full scan | 362 |
+| Rerank `probe=0.5` | 152 |
+| Rerank `probe=0.25` (default) | 139 |
+| Rerank `probe=0.1` | 129 |
 
 From `scripts/ablation-search.js` (same data, toggling search-side knobs):
 
