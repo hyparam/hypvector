@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs'
-import { asyncBufferFromFile, parquetMetadataAsync } from 'hyparquet'
+import { asyncBufferFromFile, cachedAsyncBuffer, parquetMetadataAsync } from 'hyparquet'
 import { fileWriter } from 'hyparquet-writer'
 import { readVectors } from './src/readVectors.js'
 import { searchVectors } from './src/searchVectors.js'
@@ -113,20 +113,22 @@ function instrument(buf) {
  * @returns {Promise<{ label: string, avgMs: number, avgBytes: number, avgFetches: number, tops: string[][] }>}
  */
 async function runSearchSuite(label, opts) {
-  const buf = instrument(await asyncBufferFromFile(filename))
+  // Per-query: build a fresh cached buffer atop a counter-instrumented raw buffer.
+  // (Cold cache each query, so reported bytes/fetches reflect a single from-scratch query.)
   const times = []
   const bytesPer = []
   const fetchesPer = []
   const tops = []
   for (const q of queries) {
-    buf.reset()
+    const raw = instrument(await asyncBufferFromFile(filename))
+    const cached = cachedAsyncBuffer(raw)
     const start = performance.now()
     const results = await searchVectors({
-      url: filename, query: q.vector, topK: 10, sourceFile: buf, sourceMetadata: metadata, ...opts,
+      url: filename, query: q.vector, topK: 10, sourceFile: cached, sourceMetadata: metadata, ...opts,
     })
     times.push(performance.now() - start)
-    bytesPer.push(buf.bytes)
-    fetchesPer.push(buf.fetches)
+    bytesPer.push(raw.bytes)
+    fetchesPer.push(raw.fetches)
     tops.push(results.map(r => String(r.id)))
   }
   const avgMs = times.reduce((s, t) => s + t, 0) / times.length

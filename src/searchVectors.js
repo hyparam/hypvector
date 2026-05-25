@@ -1,4 +1,4 @@
-import { asyncBufferFromFile, asyncBufferFromUrl, parquetMetadataAsync, parquetRead } from 'hyparquet'
+import { asyncBufferFromFile, asyncBufferFromUrl, cachedAsyncBuffer, parquetMetadataAsync, parquetRead } from 'hyparquet'
 import { defaultBinaryColumn, defaultIdColumn, defaultVectorColumn } from './constants.js'
 import {
   cosineSimilarity,
@@ -157,12 +157,10 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
   const decoder = new TextDecoder()
 
   const perGroup = await Promise.all(rowGroupRanges.map(async ({ rowStart, rowEnd }) => {
-    /** @type {{ rowIndex: number, score: number, id: string }[]} */
-    const local = []
-    /** @type {{ start: number, ids: any[] } | null} */
-    let idChunk = null
-    /** @type {{ start: number, rows: Uint8Array[] } | null} */
-    let vecChunk = null
+    /** @type {Map<number, number>} rowIndex -> score */
+    const scoredRows = new Map()
+    /** @type {{ start: number, ids: any[] }[]} */
+    const idChunks = []
     await parquetRead({
       file,
       metadata,
@@ -171,35 +169,40 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
       rowEnd,
       useOffsetIndex: true,
       onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
-        if (columnName === defaultIdColumn) {
-          idChunk = { start: chunkStart, ids: /** @type {any[]} */ (columnData) }
-        } else if (columnName === defaultVectorColumn) {
-          vecChunk = { start: chunkStart, rows: /** @type {Uint8Array[]} */ (columnData) }
-        }
-        if (!idChunk || !vecChunk || idChunk.start !== vecChunk.start) return
-        const { start, rows } = vecChunk
-        const { ids } = idChunk
-        for (let i = 0; i < rows.length; i += 1) {
-          const rowIndex = start + i
-          if (!candidateSet.has(rowIndex)) continue
-          const bytes = rows[i]
-          /** @type {Float32Array} */
-          let vector
-          if (bytes.byteOffset % 4 === 0) {
-            vector = new Float32Array(bytes.buffer, bytes.byteOffset, dim)
-          } else {
-            vector = new Float32Array(dim)
-            new Uint8Array(vector.buffer).set(bytes)
+        if (columnName === defaultVectorColumn) {
+          const rows = /** @type {Uint8Array[]} */ (columnData)
+          for (let i = 0; i < rows.length; i += 1) {
+            const rowIndex = chunkStart + i
+            if (!candidateSet.has(rowIndex)) continue
+            const bytes = rows[i]
+            /** @type {Float32Array} */
+            let vector
+            if (bytes.byteOffset % 4 === 0) {
+              vector = new Float32Array(bytes.buffer, bytes.byteOffset, dim)
+            } else {
+              vector = new Float32Array(dim)
+              new Uint8Array(vector.buffer).set(bytes)
+            }
+            scoredRows.set(rowIndex, computeScore(queryF32, vector, scoringMetric))
           }
-          const rawId = ids[i]
-          const id = typeof rawId === 'string' ? rawId : decoder.decode(rawId)
-          local.push({ rowIndex, id, score: computeScore(queryF32, vector, scoringMetric) })
+        } else if (columnName === defaultIdColumn) {
+          idChunks.push({ start: chunkStart, ids: /** @type {any[]} */ (columnData) })
         }
-        // Reset so subsequent paired chunks within the same group are handled.
-        idChunk = null
-        vecChunk = null
       },
     })
+    /** @type {{ rowIndex: number, score: number, id: string }[]} */
+    const local = []
+    for (const [rowIndex, score] of scoredRows) {
+      let id = String(rowIndex)
+      for (const { start, ids } of idChunks) {
+        if (rowIndex >= start && rowIndex < start + ids.length) {
+          const raw = ids[rowIndex - start]
+          id = typeof raw === 'string' ? raw : decoder.decode(raw)
+          break
+        }
+      }
+      local.push({ rowIndex, score, id })
+    }
     return local
   }))
 
@@ -379,13 +382,19 @@ function lookupId(chunks, rowIndex) {
  * @param {{ url: string, signal?: AbortSignal }} options
  * @returns {Promise<AsyncBuffer>}
  */
-function defaultAsyncBufferFactory({ url, signal }) {
+async function defaultAsyncBufferFactory({ url, signal }) {
+  /** @type {AsyncBuffer} */
+  let raw
   if (url.startsWith('http://') || url.startsWith('https://')) {
     /** @type {RequestInit} */
     const requestInit = signal ? { signal } : {}
-    return asyncBufferFromUrl({ url, requestInit })
+    raw = await asyncBufferFromUrl({ url, requestInit })
+  } else {
+    raw = await asyncBufferFromFile(url)
   }
-  return asyncBufferFromFile(url)
+  // Cache slices so repeated reads of the same byte range (footer, offset
+  // indexes, overlapping pages) don't re-fetch.
+  return cachedAsyncBuffer(raw)
 }
 
 /**
