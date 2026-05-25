@@ -6,11 +6,12 @@ import {
   defaultClusterColumn,
   defaultClusterIterations,
   defaultIdColumn,
+  defaultInt8Column,
   defaultRowGroupSize,
   defaultVectorColumn,
   hypVectorVersion,
 } from './constants.js'
-import { l2Normalize, packBinary, packFloat32 } from './utils.js'
+import { l2Normalize, packBinary, packFloat32, packInt8 } from './utils.js'
 
 /**
  * @import { WriteVectorsOptions } from './types.js'
@@ -46,6 +47,8 @@ export async function writeVectors({
   clusters = 0,
   clusterIterations = defaultClusterIterations,
   clusterSeed = 1,
+  int8 = false,
+  int8Scale = 127,
 }) {
   if (!Number.isInteger(dimension) || dimension <= 0) {
     throw new Error(`invalid dimension: ${dimension}`)
@@ -64,6 +67,8 @@ export async function writeVectors({
   const packed = []
   /** @type {Uint8Array[] | null} */
   const packedBin = binary ? [] : null
+  /** @type {Uint8Array[] | null} */
+  const packedInt8 = int8 ? [] : null
 
   for await (const record of vectors) {
     const { id, vector } = record
@@ -74,6 +79,10 @@ export async function writeVectors({
     ids.push(String(id))
     packed.push(packFloat32(v))
     if (packedBin) packedBin.push(packBinary(v, dimension))
+    if (packedInt8) {
+      const i8 = packInt8(v, int8Scale)
+      packedInt8.push(new Uint8Array(i8.buffer, i8.byteOffset, i8.byteLength))
+    }
   }
 
   /** @type {number[] | null} */
@@ -92,12 +101,14 @@ export async function writeVectors({
     const idsOut = new Array(ids.length)
     const packedOut = new Array(ids.length)
     const packedBinOut = new Array(ids.length)
+    const packedInt8Out = packedInt8 ? new Array(ids.length) : null
     const clusterOut = new Array(ids.length)
     for (let i = 0; i < sorted.length; i += 1) {
       const src = sorted[i]
       idsOut[i] = ids[src]
       packedOut[i] = packed[src]
       packedBinOut[i] = packedBin[src]
+      if (packedInt8Out && packedInt8) packedInt8Out[i] = packedInt8[src]
       clusterOut[i] = assignments[src]
     }
     ids.length = 0
@@ -106,6 +117,10 @@ export async function writeVectors({
     packed.push(...packedOut)
     packedBin.length = 0
     packedBin.push(...packedBinOut)
+    if (packedInt8 && packedInt8Out) {
+      packedInt8.length = 0
+      packedInt8.push(...packedInt8Out)
+    }
     clusterIds = clusterOut
   }
 
@@ -117,6 +132,8 @@ export async function writeVectors({
     { key: 'hypvector.binary', value: String(binary) },
     { key: 'hypvector.count', value: String(ids.length) },
     { key: 'hypvector.clusters', value: String(centroids ? centroids.length : 0) },
+    { key: 'hypvector.int8', value: String(!!packedInt8) },
+    { key: 'hypvector.int8Scale', value: String(int8Scale) },
   ]
   if (centroids && clusterIds) {
     // Pack centroids as one contiguous Uint8Array, then base64-encode.
@@ -155,6 +172,15 @@ export async function writeVectors({
       name: defaultBinaryColumn,
       type: 'FIXED_LEN_BYTE_ARRAY',
       type_length: binaryBytes,
+      repetition_type: 'REQUIRED',
+    }
+  }
+  if (packedInt8) {
+    columnData.push({ name: defaultInt8Column, data: packedInt8 })
+    schemaOverrides[defaultInt8Column] = {
+      name: defaultInt8Column,
+      type: 'FIXED_LEN_BYTE_ARRAY',
+      type_length: dimension,
       repetition_type: 'REQUIRED',
     }
   }
