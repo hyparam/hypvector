@@ -109,12 +109,12 @@ export async function writeVectors({
       packedBinOut[i] = packedBin[src]
       clusterCounts[remap[assignments[src]]] += 1
     }
-    ids.length = 0
-    ids.push(...idsOut)
-    packed.length = 0
-    packed.push(...packedOut)
-    packedBin.length = 0
-    packedBin.push(...packedBinOut)
+    // In-place swap (push(...arr) blows the call stack at ~100k elements).
+    for (let i = 0; i < ids.length; i += 1) {
+      ids[i] = idsOut[i]
+      packed[i] = packedOut[i]
+      packedBin[i] = packedBinOut[i]
+    }
   }
 
   const kvMetadata = [
