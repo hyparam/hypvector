@@ -113,6 +113,10 @@ Key-value metadata:
 | `hypvector.centroids` | base64-encoded centroid binary codes (`clusters × dim/8` bytes); present when `clusters > 0` |
 | `hypvector.clusterCounts` | base64-encoded `Uint32Array` of per-cluster row counts; present when `clusters > 0` |
 
+## Scale envelope
+
+HypVector's clustering + binary-Hamming rerank is well-suited for vector counts up through ~few hundred thousand, where binary codes still distinguish near neighbors. At ~1M and beyond, recall degrades because many candidates tie at the same Hamming distance and 384-bit codes can't separate them; recovering recall requires a much larger `rerankFactor` (which then dominates phase 2 cost), and full graph-based ANN (HNSW etc.) becomes a better fit than this library. The 156k wiki numbers below are within the sweet spot.
+
 ## Performance (156k 384-dim wiki, local file)
 
 From `scripts/ablation.js` (write-side optimizations):
