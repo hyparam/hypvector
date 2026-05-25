@@ -8,6 +8,10 @@ import { readVectors } from '../src/readVectors.js'
 import { searchVectors } from '../src/searchVectors.js'
 import { parseKvMetadata } from '../src/utils.js'
 
+/**
+ * @import { AsyncBuffer } from 'hyparquet'
+ */
+
 const filename = process.argv[2] ?? 'data/wiki_en.vectors.clustered.parquet'
 
 const file = await asyncBufferFromFile(filename)
@@ -48,13 +52,14 @@ function classify(start, end) {
 
 const fetches = []
 const raw = await asyncBufferFromFile(filename)
-const wrapped = /** @type {any} */ ({
+/** @type {AsyncBuffer} */
+const wrapped = {
   byteLength: raw.byteLength,
   slice: (start, end) => {
     fetches.push({ start, end: end ?? raw.byteLength })
     return raw.slice(start, end)
   },
-})
+}
 const cached = cachedAsyncBuffer(wrapped)
 
 const results = await searchVectors({
@@ -76,5 +81,5 @@ console.log('\nBy column:')
 for (const [k, v] of grouped) {
   console.log(`  ${k.padEnd(30)} ${v.count.toString().padStart(4)} fetches  ${(v.bytes / 1024).toFixed(1).padStart(8)} KB`)
 }
-console.log(`\nTop 5 candidates:`)
+console.log('\nTop 5 candidates:')
 for (const r of results.slice(0, 5)) console.log(`  ${r.id}  ${r.score.toFixed(4)}`)

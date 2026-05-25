@@ -20,6 +20,10 @@ import { searchVectors } from '../src/searchVectors.js'
 import { parseKvMetadata } from '../src/utils.js'
 import { writeVectors } from '../src/writeVectors.js'
 
+/**
+ * @import { AsyncBuffer } from 'hyparquet'
+ */
+
 const SRC = process.argv[2] ?? 'data/wiki_en.vectors.parquet'
 
 const file = await asyncBufferFromFile(SRC)
@@ -27,7 +31,7 @@ const metadata = await parquetMetadataAsync(file)
 const meta = parseKvMetadata(metadata)
 console.log(`Source: ${SRC} (${meta.count.toLocaleString()} × ${meta.dimension}-dim)`)
 
-console.log(`Reading all vectors...`)
+console.log('Reading all vectors...')
 const records = []
 for await (const record of readVectors({ file, metadata, includeMetadata: false })) {
   records.push(record)
@@ -70,12 +74,24 @@ for await (const r of readVectors({ file, metadata })) {
   i += 1
 }
 
-/** @param {import('hyparquet').AsyncBuffer} buf */
+/**
+ * Wrap an AsyncBuffer with byte / fetch counters.
+ *
+ * @param {AsyncBuffer} buf
+ * @returns {AsyncBuffer & { bytes: number, fetches: number }}
+ */
 function instrument(buf) {
-  const w = /** @type {any} */ (buf)
-  w.bytes = 0; w.fetches = 0
   const slice = buf.slice.bind(buf)
-  w.slice = (s, e) => { w.bytes += (e ?? buf.byteLength) - s; w.fetches += 1; return slice(s, e) }
+  const w = {
+    byteLength: buf.byteLength,
+    bytes: 0,
+    fetches: 0,
+    slice(s, e) {
+      w.bytes += (e ?? buf.byteLength) - s
+      w.fetches += 1
+      return slice(s, e)
+    },
+  }
   return w
 }
 

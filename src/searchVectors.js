@@ -130,7 +130,7 @@ async function searchExact({ file, metadata, meta, queryF32, scoringMetric, repo
  */
 async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK, rerankFactor, probe }) {
   const dim = meta.dimension
-  const binaryBytes = (dim + 7) >> 3
+  const binaryBytes = dim + 7 >> 3
   const candidatesK = Math.max(topK * rerankFactor, topK)
 
   const queryBin = packBinary(queryF32, dim)

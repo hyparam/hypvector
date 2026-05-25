@@ -107,7 +107,7 @@ export function packFloat32(v) {
  * @returns {Uint8Array}
  */
 export function packBinary(v, dim = v.length) {
-  const bytes = new Uint8Array((dim + 7) >> 3)
+  const bytes = new Uint8Array(dim + 7 >> 3)
   for (let i = 0; i < dim; i += 1) {
     if (v[i] >= 0) bytes[i >> 3] |= 1 << (i & 7)
   }
@@ -191,7 +191,7 @@ export function parseKvMetadata(metadata) {
   /** @type {HypVectorMetadata} */
   const out = { version, dimension, metric, normalized, hasBinary, count, clusters }
   if (clusters > 0 && kv['hypvector.centroids']) {
-    const binaryBytes = (dimension + 7) >> 3
+    const binaryBytes = dimension + 7 >> 3
     const bytes = decodeBase64(kv['hypvector.centroids'])
     if (bytes.byteLength !== clusters * binaryBytes) {
       throw new Error(`centroids length mismatch: ${bytes.byteLength} vs ${clusters * binaryBytes}`)

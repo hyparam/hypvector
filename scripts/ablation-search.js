@@ -12,12 +12,16 @@
  * sweep that picked 32 KB as the default).
  */
 import { promises as fs } from 'node:fs'
-import { asyncBufferFromFile, asyncBufferFromUrl, cachedAsyncBuffer, parquetMetadataAsync, parquetRead } from 'hyparquet'
-import { defaultBinaryColumn, defaultClusterProbeFraction, defaultIdColumn, defaultVectorColumn } from '../src/constants.js'
+import { asyncBufferFromFile, cachedAsyncBuffer, parquetMetadataAsync, parquetRead } from 'hyparquet'
 import { hammingDistanceBytes } from '../src/cluster.js'
+import { defaultBinaryColumn, defaultClusterProbeFraction, defaultIdColumn, defaultVectorColumn } from '../src/constants.js'
 import { readVectors } from '../src/readVectors.js'
 import { searchVectors } from '../src/searchVectors.js'
-import { l2Normalize, packBinary, parseKvMetadata, cosineSimilarity, dotProduct } from '../src/utils.js'
+import { cosineSimilarity, dotProduct, l2Normalize, packBinary, parseKvMetadata } from '../src/utils.js'
+
+/**
+ * @import { AsyncBuffer } from 'hyparquet'
+ */
 
 const FILE = process.argv[2] ?? 'data/abl_C_cluster.parquet'
 
@@ -36,12 +40,20 @@ for await (const r of readVectors({ file: sourceFile, metadata })) {
   i += 1
 }
 
-/** @param {import('hyparquet').AsyncBuffer} buf */
+/**
+ * Wrap an AsyncBuffer with byte / fetch counters.
+ *
+ * @param {AsyncBuffer} buf
+ * @returns {AsyncBuffer & { bytes: number, fetches: number }}
+ */
 function instrument(buf) {
-  const w = /** @type {any} */ (buf)
-  w.bytes = 0; w.fetches = 0
   const orig = buf.slice.bind(buf)
-  w.slice = (s, e) => { w.bytes += (e ?? buf.byteLength) - s; w.fetches += 1; return orig(s, e) }
+  const w = {
+    byteLength: buf.byteLength,
+    bytes: 0,
+    fetches: 0,
+    slice(s, e) { w.bytes += (e ?? buf.byteLength) - s; w.fetches += 1; return orig(s, e) },
+  }
   return w
 }
 
@@ -91,12 +103,12 @@ console.log(`${'E3) -deferId (id in phase 2)'.padEnd(34)} ${E3.ms.toFixed(1).pad
  * but with coalesce / deferId knobs.
  *
  * @param {Float32Array} query
- * @param {import('hyparquet').AsyncBuffer} file
+ * @param {AsyncBuffer} file
  * @param {{ coalesce: boolean, deferId: boolean }} opts
  */
 async function searchAblated(query, file, opts) {
   const dim = meta.dimension
-  const binaryBytes = (dim + 7) >> 3
+  const binaryBytes = dim + 7 >> 3
   const candidatesK = 100
   const topK = 10
 

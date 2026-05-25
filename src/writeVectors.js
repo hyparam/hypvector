@@ -14,6 +14,7 @@ import { l2Normalize, packBinary, packFloat32 } from './utils.js'
 /**
  * @import { WriteVectorsOptions } from './types.js'
  * @import { ColumnSource } from 'hyparquet-writer'
+ * @import { SchemaElement } from 'hyparquet'
  */
 
 /**
@@ -55,7 +56,7 @@ export async function writeVectors({
   }
 
   const effectivePageSize = pageSize ?? (binary ? defaultBinaryPageSize : undefined)
-  const binaryBytes = (dimension + 7) >> 3
+  const binaryBytes = dimension + 7 >> 3
 
   /** @type {string[]} */
   const ids = []
@@ -81,7 +82,7 @@ export async function writeVectors({
   let clusterCounts = null
   if (clusters > 0 && packedBin) {
     const { assignments, centroids: cs } = binaryKMeans(
-      packedBin, binaryBytes, clusters, clusterIterations, clusterSeed,
+      packedBin, binaryBytes, clusters, clusterIterations, clusterSeed
     )
     // Renumber cluster ids so adjacent ids = similar centroids. Lets the
     // top-N nearest clusters at query time collapse to fewer scan ranges.
@@ -141,7 +142,7 @@ export async function writeVectors({
     { name: defaultIdColumn, data: ids },
     { name: defaultVectorColumn, data: packed },
   ]
-  /** @type {Record<string, import('hyparquet').SchemaElement>} */
+  /** @type {Record<string, SchemaElement>} */
   const schemaOverrides = {
     [defaultVectorColumn]: {
       name: defaultVectorColumn,
@@ -169,7 +170,7 @@ export async function writeVectors({
     kvMetadata,
     columnData,
     codec,
-    ...(effectivePageSize !== undefined ? { pageSize: effectivePageSize } : {}),
+    ...effectivePageSize !== undefined ? { pageSize: effectivePageSize } : {},
   })
 }
 

@@ -31,7 +31,7 @@ const file = await asyncBufferFromFile(SRC)
 const metadata = await parquetMetadataAsync(file)
 const meta = parseKvMetadata(metadata)
 console.log(`Source: ${SRC} (${meta.count.toLocaleString()} vectors × ${meta.dimension}-dim)`)
-console.log(`Reading vectors...`)
+console.log('Reading vectors...')
 
 const readStart = performance.now()
 /** @type {{ id: string | number, vector: Float32Array }[]} */
@@ -51,8 +51,8 @@ await writeVectors({
   normalize: meta.normalized,
   binary: true,
   clusters: CLUSTERS,
-  ...(PAGE_SIZE !== undefined ? { pageSize: PAGE_SIZE } : {}),
-  ...(ROW_GROUP_SIZE !== undefined ? { rowGroupSize: ROW_GROUP_SIZE } : {}),
+  ...PAGE_SIZE !== undefined ? { pageSize: PAGE_SIZE } : {},
+  ...ROW_GROUP_SIZE !== undefined ? { rowGroupSize: ROW_GROUP_SIZE } : {},
   vectors: records,
 })
 

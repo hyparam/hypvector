@@ -9,6 +9,10 @@ import { readVectors } from '../src/readVectors.js'
 import { searchVectors } from '../src/searchVectors.js'
 import { parseKvMetadata } from '../src/utils.js'
 
+/**
+ * @import { AsyncBuffer } from 'hyparquet'
+ */
+
 const filename = process.argv[2] ?? 'data/wiki_en.vectors.clustered.parquet'
 
 const stat = await fs.stat(filename)
@@ -34,17 +38,22 @@ for await (const record of readVectors({ file: sourceFile, metadata })) {
 }
 
 /**
- * @param {import('hyparquet').AsyncBuffer} buf
+ * Wrap an AsyncBuffer with byte / fetch counters.
+ *
+ * @param {AsyncBuffer} buf
+ * @returns {AsyncBuffer & { bytes: number, fetches: number }}
  */
 function instrument(buf) {
-  const wrapped = /** @type {any} */ (buf)
-  wrapped.bytes = 0
-  wrapped.fetches = 0
   const origSlice = buf.slice.bind(buf)
-  wrapped.slice = function (start, end) {
-    wrapped.bytes += (end ?? buf.byteLength) - start
-    wrapped.fetches += 1
-    return origSlice(start, end)
+  const wrapped = {
+    byteLength: buf.byteLength,
+    bytes: 0,
+    fetches: 0,
+    slice(start, end) {
+      wrapped.bytes += (end ?? buf.byteLength) - start
+      wrapped.fetches += 1
+      return origSlice(start, end)
+    },
   }
   return wrapped
 }

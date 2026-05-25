@@ -6,6 +6,10 @@ import { searchVectors } from './src/searchVectors.js'
 import { parseKvMetadata } from './src/utils.js'
 import { writeVectors } from './src/writeVectors.js'
 
+/**
+ * @import { AsyncBuffer } from 'hyparquet'
+ */
+
 const REAL_FILE = process.argv[2] ?? 'data/wiki_en.vectors.parquet'
 const SYNTHETIC_FILE = 'bench.parquet'
 const SYNTHETIC_COUNT = 50000
@@ -85,23 +89,24 @@ for await (const record of readVectors({ file: sourceFile, metadata })) {
 }
 
 /**
- * Wrap an AsyncBuffer to count bytes + fetches.
+ * Wrap an AsyncBuffer with byte / fetch counters.
  *
- * @param {import('hyparquet').AsyncBuffer} buf
- * @returns {import('hyparquet').AsyncBuffer & { bytes: number, fetches: number, reset: () => void }}
+ * @param {AsyncBuffer} buf
+ * @returns {AsyncBuffer & { bytes: number, fetches: number, reset: () => void }}
  */
 function instrument(buf) {
-  /** @type {any} */
-  const wrapped = buf
-  wrapped.bytes = 0
-  wrapped.fetches = 0
   const origSlice = buf.slice.bind(buf)
-  wrapped.slice = function (start, end) {
-    wrapped.bytes += (end ?? buf.byteLength) - start
-    wrapped.fetches += 1
-    return origSlice(start, end)
+  const wrapped = {
+    byteLength: buf.byteLength,
+    bytes: 0,
+    fetches: 0,
+    slice(start, end) {
+      wrapped.bytes += (end ?? buf.byteLength) - start
+      wrapped.fetches += 1
+      return origSlice(start, end)
+    },
+    reset() { wrapped.bytes = 0; wrapped.fetches = 0 },
   }
-  wrapped.reset = () => { wrapped.bytes = 0; wrapped.fetches = 0 }
   return wrapped
 }
 
