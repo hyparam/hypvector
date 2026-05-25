@@ -1,5 +1,5 @@
 import { parquetWrite, schemaFromColumnData } from 'hyparquet-writer'
-import { binaryKMeans } from './cluster.js'
+import { binaryKMeans, reorderClustersByHamming } from './cluster.js'
 import {
   defaultBinaryColumn,
   defaultBinaryPageSize,
@@ -83,13 +83,18 @@ export async function writeVectors({
     const { assignments, centroids: cs } = binaryKMeans(
       packedBin, binaryBytes, clusters, clusterIterations, clusterSeed,
     )
-    centroids = cs
-    // Sort indices by cluster id so each cluster occupies a contiguous row
-    // range — searchVectors uses the per-cluster counts in KV metadata to
-    // pick exact row ranges to scan in phase 1.
+    // Renumber cluster ids so adjacent ids = similar centroids. Lets the
+    // top-N nearest clusters at query time collapse to fewer scan ranges.
+    const remap = reorderClustersByHamming(cs)
+    const reorderedCentroids = new Array(cs.length)
+    for (let oldId = 0; oldId < cs.length; oldId += 1) {
+      reorderedCentroids[remap[oldId]] = cs[oldId]
+    }
+    centroids = reorderedCentroids
+    // Sort rows by the NEW cluster id.
     const order = new Int32Array(ids.length)
     for (let i = 0; i < ids.length; i += 1) order[i] = i
-    const sorted = Array.from(order).sort((a, b) => assignments[a] - assignments[b])
+    const sorted = Array.from(order).sort((a, b) => remap[assignments[a]] - remap[assignments[b]])
     const idsOut = new Array(ids.length)
     const packedOut = new Array(ids.length)
     const packedBinOut = new Array(ids.length)
@@ -99,7 +104,7 @@ export async function writeVectors({
       idsOut[i] = ids[src]
       packedOut[i] = packed[src]
       packedBinOut[i] = packedBin[src]
-      clusterCounts[assignments[src]] += 1
+      clusterCounts[remap[assignments[src]]] += 1
     }
     ids.length = 0
     ids.push(...idsOut)
