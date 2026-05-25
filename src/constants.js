@@ -26,4 +26,4 @@ export const defaultClusterIterations = 6
 
 // Default fraction of clusters scanned in phase 1 at query time when the
 // file has cluster metadata. Lower = faster but lower recall.
-export const defaultClusterProbeFraction = 0.1
+export const defaultClusterProbeFraction = 0.25

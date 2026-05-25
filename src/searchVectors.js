@@ -251,7 +251,9 @@ function selectClusterRowRanges(meta, queryBin, probe) {
   clusterDist.sort((a, b) => a.hamming - b.hamming)
 
   const probeFraction = probe === undefined ? defaultClusterProbeFraction : probe
-  const targetClusters = probeFraction >= 1
+  // probe in (0, 1] is a fraction of clusters (1.0 = all clusters);
+  // probe > 1 is an absolute count.
+  const targetClusters = probeFraction > 1
     ? Math.min(Math.ceil(probeFraction), centroids.length)
     : Math.max(1, Math.ceil(centroids.length * probeFraction))
 
@@ -287,7 +289,9 @@ function selectClusterRowGroupRanges(metadata, meta, queryBin, probe) {
   clusterDist.sort((a, b) => a.hamming - b.hamming)
 
   const probeFraction = probe === undefined ? defaultClusterProbeFraction : probe
-  const targetClusters = probeFraction >= 1
+  // probe in (0, 1] is a fraction of clusters (1.0 = all clusters);
+  // probe > 1 is an absolute count.
+  const targetClusters = probeFraction > 1
     ? Math.min(Math.ceil(probeFraction), centroids.length)
     : Math.max(1, Math.ceil(centroids.length * probeFraction))
   const wantedClusters = new Set(clusterDist.slice(0, targetClusters).map(c => c.cluster))
