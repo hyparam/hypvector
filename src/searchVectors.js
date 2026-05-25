@@ -4,6 +4,7 @@ import {
   cosineSimilarity,
   dotProduct,
   euclideanDistance,
+  l2Normalize,
   parseKvMetadata,
 } from './utils.js'
 
@@ -42,9 +43,21 @@ export async function searchVectors({
   if (query.length !== meta.dimension) {
     throw new Error(`query has dimension ${query.length}, file expects ${meta.dimension}`)
   }
-  const usedMetric = metric ?? meta.metric
+  const requestedMetric = metric ?? meta.metric
   const dim = meta.dimension
-  const queryF32 = query instanceof Float32Array ? query : Float32Array.from(query)
+  let queryF32 = query instanceof Float32Array ? query : Float32Array.from(query)
+
+  // When stored vectors are pre-normalized, cosine == dot(query/||query||, candidate).
+  // Pre-normalize the query once and score with dot product to skip the per-candidate
+  // sqrt/normalize hot loop inside cosineSimilarity.
+  let scoringMetric = requestedMetric
+  if (requestedMetric === 'cosine' && meta.normalized) {
+    queryF32 = l2Normalize(queryF32)
+    scoringMetric = 'dot'
+  }
+  // Report scores under the user-requested metric (cosine and dot agree numerically
+  // here because both query and candidates are unit vectors).
+  const reportedMetric = requestedMetric
 
   /** @type {{ rowIndex: number, score: number }[]} */
   const heap = []
@@ -57,16 +70,16 @@ export async function searchVectors({
     columns: [defaultIdColumn, defaultVectorColumn],
     onChunk: ({ columnName, columnData, rowStart }) => {
       if (columnName === defaultVectorColumn) {
-        scoreChunk(columnData, rowStart, dim, queryF32, usedMetric, heap, topK)
+        scoreChunk(columnData, rowStart, dim, queryF32, scoringMetric, heap, topK)
       } else if (columnName === defaultIdColumn) {
         idChunks.push({ start: rowStart, ids: /** @type {string[]} */ (columnData) })
       }
     },
   })
 
-  const ordered = sortHeap(heap, usedMetric)
+  const ordered = sortHeap(heap, reportedMetric)
   return ordered.map(({ rowIndex, score }) => ({
-    id: lookupId(idChunks, rowIndex),
+    id: lookupId(idChunks, rowIndex) ?? String(rowIndex),
     score,
     rowIndex,
   }))
