@@ -10,8 +10,15 @@
  */
 import { promises as fs } from 'node:fs'
 import { asyncBufferFromFile, cachedAsyncBuffer, parquetMetadataAsync } from 'hyparquet'
-import { compressors } from 'hyparquet-compressors'
+import { compressors as readCompressors } from 'hyparquet-compressors'
 import { fileWriter, parquetWrite, schemaFromColumnData } from 'hyparquet-writer'
+import { snappyCompress } from 'hyparquet-writer/src/snappy.js'
+
+// Reader compressors (decompress) for hyparquet, writer needs compress fns.
+// hyparquet-writer ships snappyCompress; hyparquet-compressors only has
+// decompressors. So we can write SNAPPY locally; ZSTD compression would
+// need a separate compress lib.
+const writeCompressors = { SNAPPY: snappyCompress }
 import { binaryKMeans, reorderClustersByHamming } from '../src/cluster.js'
 import { defaultBinaryColumn, defaultIdColumn, defaultVectorColumn } from '../src/constants.js'
 import { readVectors } from '../src/readVectors.js'
@@ -70,11 +77,21 @@ const kvMetadata = [
   { key: 'hypvector.clusterCounts', value: b64(new Uint8Array(counts.buffer)) },
 ]
 
-async function writeVariant(path, { codec, vectorEncoding, binaryEncoding }) {
+async function writeVariant(path, { codec, vectorEncoding, vectorCodec, binaryCodec, binaryEncoding }) {
   const columnData = [
     { name: defaultIdColumn, data: idsOut },
-    { name: defaultVectorColumn, data: packedOut, ...(vectorEncoding ? { encoding: vectorEncoding } : {}) },
-    { name: defaultBinaryColumn, data: binOut, ...(binaryEncoding ? { encoding: binaryEncoding } : {}) },
+    {
+      name: defaultVectorColumn,
+      data: packedOut,
+      ...(vectorEncoding ? { encoding: vectorEncoding } : {}),
+      ...(vectorCodec ? { codec: vectorCodec } : {}),
+    },
+    {
+      name: defaultBinaryColumn,
+      data: binOut,
+      ...(binaryEncoding ? { encoding: binaryEncoding } : {}),
+      ...(binaryCodec ? { codec: binaryCodec } : {}),
+    },
   ]
   const schemaInput = columnData.map(c => c.name === defaultIdColumn ? { ...c, type: /** @type {const} */ ('STRING') } : c)
   const schema = schemaFromColumnData({
@@ -86,7 +103,7 @@ async function writeVariant(path, { codec, vectorEncoding, binaryEncoding }) {
   })
   await parquetWrite({
     writer: fileWriter(path), schema, rowGroupSize: 1000, pageSize: 32768,
-    codec, columnData, kvMetadata, compressors,
+    codec, columnData, kvMetadata, compressors: writeCompressors,
   })
   return (await fs.stat(path)).size
 }
@@ -107,7 +124,9 @@ async function bench(path) {
     }
     const cached = cachedAsyncBuffer(wrapped)
     const t = performance.now()
-    await searchVectors({ url: path, query: q, topK: 10, sourceFile: cached, sourceMetadata: md })
+    await searchVectors({
+      url: path, query: q, topK: 10, sourceFile: cached, sourceMetadata: md, compressors: readCompressors,
+    })
     times.push(performance.now() - t)
   }
   let sum = 0
@@ -115,12 +134,15 @@ async function bench(path) {
   return { ms: sum / times.length, mb: bytes / queries.length / 1e6 }
 }
 
+// Compression options are limited to what hyparquet-writer can compress
+// (currently SNAPPY only via its internal snappyCompress). ZSTD on write
+// would need an external compress lib.
 const variants = [
-  { name: 'baseline', label: 'UNCOMPRESSED, PLAIN', codec: 'UNCOMPRESSED' },
-  { name: 'snappy', label: 'SNAPPY', codec: 'SNAPPY' },
-  { name: 'zstd', label: 'ZSTD', codec: 'ZSTD' },
-  { name: 'bss', label: 'UNCOMPRESSED, vector=BSS', codec: 'UNCOMPRESSED', vectorEncoding: 'BYTE_STREAM_SPLIT' },
-  { name: 'bss_zstd', label: 'ZSTD, vector=BSS', codec: 'ZSTD', vectorEncoding: 'BYTE_STREAM_SPLIT' },
+  { name: 'baseline', label: 'UNCOMPRESSED', codec: 'UNCOMPRESSED' },
+  { name: 'binsnap', label: 'vector=UNCOMP, binary=SNAPPY', codec: 'UNCOMPRESSED', binaryCodec: 'SNAPPY' },
+  { name: 'allsnap', label: 'all=SNAPPY (global)', codec: 'SNAPPY' },
+  { name: 'bss', label: 'vector=BSS uncomp', codec: 'UNCOMPRESSED', vectorEncoding: 'BYTE_STREAM_SPLIT' },
+  { name: 'bsssnap', label: 'vector=BSS+SNAPPY', codec: 'UNCOMPRESSED', vectorEncoding: 'BYTE_STREAM_SPLIT', vectorCodec: 'SNAPPY' },
 ]
 
 console.log(`\n${'variant'.padEnd(28)} ${'file MB'.padStart(9)} ${'ms'.padStart(7)} ${'MB read'.padStart(10)}`)
