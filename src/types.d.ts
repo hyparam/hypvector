@@ -1,4 +1,4 @@
-import type { AsyncBuffer, asyncBufferFromUrl, Compressors, FileMetaData } from 'hyparquet'
+import type { AsyncBuffer, asyncBufferFromUrl, CompressionCodec, Compressors, FileMetaData } from 'hyparquet'
 import type { Writer } from 'hyparquet-writer'
 
 export type DistanceMetric = 'cosine' | 'dot' | 'euclidean'
@@ -16,6 +16,7 @@ export interface WriteVectorsOptions {
   rowGroupSize?: number // rows per row group (default: 10000)
   metric?: DistanceMetric // hint stored in kv metadata (default: 'cosine')
   normalize?: boolean // l2-normalize vectors on write (default: false)
+  codec?: CompressionCodec // parquet codec (default: 'UNCOMPRESSED'; SNAPPY/ZSTD rarely shrink float embeddings and cost ~2-3x query latency)
 }
 
 export interface ReadVectorsOptions {

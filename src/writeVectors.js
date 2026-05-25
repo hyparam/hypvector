@@ -35,6 +35,7 @@ export async function writeVectors({
   rowGroupSize = defaultRowGroupSize,
   metric = 'cosine',
   normalize = false,
+  codec = 'UNCOMPRESSED',
 }) {
   if (!Number.isInteger(dimension) || dimension <= 0) {
     throw new Error(`invalid dimension: ${dimension}`)
@@ -86,5 +87,6 @@ export async function writeVectors({
     rowGroupSize,
     kvMetadata,
     columnData,
+    codec,
   })
 }
