@@ -113,9 +113,18 @@ Key-value metadata:
 | `hypvector.centroids` | base64-encoded centroid binary codes (`clusters × dim/8` bytes); present when `clusters > 0` |
 | `hypvector.clusterCounts` | base64-encoded `Uint32Array` of per-cluster row counts; present when `clusters > 0` |
 
-## Scale envelope
+## Scale guidance
 
-HypVector's clustering + binary-Hamming rerank is well-suited for vector counts up through ~few hundred thousand, where binary codes still distinguish near neighbors. At ~1M and beyond, recall degrades because many candidates tie at the same Hamming distance and 384-bit codes can't separate them; recovering recall requires a much larger `rerankFactor` (which then dominates phase 2 cost), and full graph-based ANN (HNSW etc.) becomes a better fit than this library. The 156k wiki numbers below are within the sweet spot.
+The default `rerankFactor` of 10 is tuned for the hundreds-of-thousands range. As `N` grows, more binary candidates tie at the same Hamming distance and a wider phase-1 pool is needed to keep recall up. On a 1M synthetic dataset (256 true clusters, Gaussian noise):
+
+| `rerankFactor` | candidates fetched | ms | recall@10 |
+|---:|---:|---:|---:|
+| 10  | 100 | 41  | 18% |
+| 30  | 300 | 58  | 32% |
+| 100 | 1,000 | 155 | 68% |
+| 300 | 3,000 | 443 | 98% |
+
+Rough rule: `rerankFactor ≈ max(10, N / 3000)`. At 1M that's ~333, giving ~98% recall at ~440 ms — still about an order of magnitude faster than the 950 ms exact scan.
 
 ## Performance (156k 384-dim wiki, local file)
 
