@@ -20,16 +20,6 @@ export const defaultIdColumn = 'id'
 // more on phase 2 but cost more on phase-1 page-header overhead.
 export const defaultBinaryPageSize = 32 * 1024
 
-// Default name of the cluster-id column when clustering is enabled.
-export const defaultClusterColumn = 'cluster_id'
-
-// Default name of the int8-quantized vector column.
-export const defaultInt8Column = 'vector_i8'
-
-// Factor used to multiply int8 cascade pool size to get the final
-// float32 rerank pool. e.g., 100 candidates -> int8 -> top 30 -> float32.
-export const defaultInt8WinnerRatio = 3
-
 // Default number of k-means iterations when clustering.
 export const defaultClusterIterations = 6
 

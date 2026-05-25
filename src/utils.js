@@ -99,43 +99,6 @@ export function packFloat32(v) {
 }
 
 /**
- * Pack a vector into int8 by linearly quantizing each component to [-127, 127].
- * Stores the inverse scale (so dequantize = int8 * (1/scale)) — for vectors
- * with components in [-1, 1] (the L2-normalized case), scale is fixed at 127.
- *
- * @param {Float32Array | number[]} v
- * @param {number} scale  multiply each float by this then round to int8 (default 127, which assumes |v[i]| <= 1)
- * @returns {Int8Array}
- */
-export function packInt8(v, scale = 127) {
-  const out = new Int8Array(v.length)
-  for (let i = 0; i < v.length; i += 1) {
-    let q = Math.round(v[i] * scale)
-    if (q > 127) q = 127
-    else if (q < -128) q = -128
-    out[i] = q
-  }
-  return out
-}
-
-/**
- * Int8 dot product implemented as Int32 accumulation. Caller divides by
- * scale_a * scale_b to recover the float dot product.
- *
- * @param {Int8Array} a
- * @param {Int8Array} b
- * @returns {number}
- */
-export function dotProductInt8(a, b) {
-  if (a.length !== b.length) {
-    throw new Error(`int8 length mismatch: ${a.length} vs ${b.length}`)
-  }
-  let sum = 0
-  for (let i = 0; i < a.length; i += 1) sum += a[i] * b[i]
-  return sum
-}
-
-/**
  * Pack a vector into a 1-bit-per-dimension binary code (sign bits).
  * Bit i of byte (i >> 3) is 1 iff v[i] >= 0. Length is ceil(dim/8) bytes.
  *
@@ -222,13 +185,11 @@ export function parseKvMetadata(metadata) {
   const hasBinary = kv['hypvector.binary'] === 'true'
   const count = Number(metadata.num_rows)
   const clusters = parseInt(kv['hypvector.clusters'] ?? '0', 10)
-  const hasInt8 = kv['hypvector.int8'] === 'true'
-  const int8Scale = parseFloat(kv['hypvector.int8Scale'] ?? '127')
   if (!dimension) {
     throw new Error('Not a hypvector parquet file: missing hypvector.dimension metadata')
   }
   /** @type {HypVectorMetadata} */
-  const out = { version, dimension, metric, normalized, hasBinary, count, clusters, hasInt8, int8Scale }
+  const out = { version, dimension, metric, normalized, hasBinary, count, clusters }
   if (clusters > 0 && kv['hypvector.centroids']) {
     const binaryBytes = (dimension + 7) >> 3
     const bytes = decodeBase64(kv['hypvector.centroids'])

@@ -18,8 +18,6 @@ export interface WriteVectorsOptions {
   normalize?: boolean // l2-normalize vectors on write (default: false)
   codec?: CompressionCodec // parquet codec (default: 'UNCOMPRESSED'; SNAPPY/ZSTD rarely shrink float embeddings and cost ~2-3x query latency)
   binary?: boolean // also write a 1-bit-per-dim sign-bit column for binary+rerank search (default: false; adds ~1.5% file size at 384-dim)
-  int8?: boolean // also write an int8-quantized vector column as an intermediate cascade tier (default: false; adds 25% file size at 384-dim)
-  int8Scale?: number // override the int8 quantization scale (default: 127, suitable for L2-normalized vectors)
   pageSize?: number // target page size in bytes (default: 1 MB). Smaller pages let `useOffsetIndex` fetch tighter ranges in rerank phase 2 at the cost of more page-header overhead.
   clusters?: number // run binary k-means with this many clusters, sort rows by cluster id, and store centroids in KV metadata. Enables phase 1 row-group skipping at query time. Implies binary=true. Recommended: 64-256 for 100k vectors.
   clusterIterations?: number // k-means iterations (default: 6)
@@ -89,6 +87,4 @@ export interface HypVectorMetadata {
   clusters: number // number of k-means clusters used to sort rows (0 = not clustered)
   centroids?: Uint8Array[] // binary centroids (length == clusters), each binaryBytes long
   clusterCounts?: Uint32Array // number of rows in each cluster; cluster k spans [cumsum[k], cumsum[k+1])
-  hasInt8: boolean // whether the file has an int8 cascade column
-  int8Scale: number // int8 quantization scale (each int8 value represents float / int8Scale); meaningless if !hasInt8
 }

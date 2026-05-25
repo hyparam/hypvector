@@ -3,15 +3,13 @@ import { binaryKMeans } from './cluster.js'
 import {
   defaultBinaryColumn,
   defaultBinaryPageSize,
-  defaultClusterColumn,
   defaultClusterIterations,
   defaultIdColumn,
-  defaultInt8Column,
   defaultRowGroupSize,
   defaultVectorColumn,
   hypVectorVersion,
 } from './constants.js'
-import { l2Normalize, packBinary, packFloat32, packInt8 } from './utils.js'
+import { l2Normalize, packBinary, packFloat32 } from './utils.js'
 
 /**
  * @import { WriteVectorsOptions } from './types.js'
@@ -47,8 +45,6 @@ export async function writeVectors({
   clusters = 0,
   clusterIterations = defaultClusterIterations,
   clusterSeed = 1,
-  int8 = false,
-  int8Scale = 127,
 }) {
   if (!Number.isInteger(dimension) || dimension <= 0) {
     throw new Error(`invalid dimension: ${dimension}`)
@@ -67,8 +63,6 @@ export async function writeVectors({
   const packed = []
   /** @type {Uint8Array[] | null} */
   const packedBin = binary ? [] : null
-  /** @type {Uint8Array[] | null} */
-  const packedInt8 = int8 ? [] : null
 
   for await (const record of vectors) {
     const { id, vector } = record
@@ -79,37 +73,33 @@ export async function writeVectors({
     ids.push(String(id))
     packed.push(packFloat32(v))
     if (packedBin) packedBin.push(packBinary(v, dimension))
-    if (packedInt8) {
-      const i8 = packInt8(v, int8Scale)
-      packedInt8.push(new Uint8Array(i8.buffer, i8.byteOffset, i8.byteLength))
-    }
   }
 
-  /** @type {number[] | null} */
-  let clusterIds = null
   /** @type {Uint8Array[] | null} */
   let centroids = null
+  /** @type {Uint32Array | null} */
+  let clusterCounts = null
   if (clusters > 0 && packedBin) {
     const { assignments, centroids: cs } = binaryKMeans(
       packedBin, binaryBytes, clusters, clusterIterations, clusterSeed,
     )
     centroids = cs
-    // Sort indices by cluster id. Stable sort preserves input order within a cluster.
+    // Sort indices by cluster id so each cluster occupies a contiguous row
+    // range — searchVectors uses the per-cluster counts in KV metadata to
+    // pick exact row ranges to scan in phase 1.
     const order = new Int32Array(ids.length)
     for (let i = 0; i < ids.length; i += 1) order[i] = i
     const sorted = Array.from(order).sort((a, b) => assignments[a] - assignments[b])
     const idsOut = new Array(ids.length)
     const packedOut = new Array(ids.length)
     const packedBinOut = new Array(ids.length)
-    const packedInt8Out = packedInt8 ? new Array(ids.length) : null
-    const clusterOut = new Array(ids.length)
+    clusterCounts = new Uint32Array(cs.length)
     for (let i = 0; i < sorted.length; i += 1) {
       const src = sorted[i]
       idsOut[i] = ids[src]
       packedOut[i] = packed[src]
       packedBinOut[i] = packedBin[src]
-      if (packedInt8Out && packedInt8) packedInt8Out[i] = packedInt8[src]
-      clusterOut[i] = assignments[src]
+      clusterCounts[assignments[src]] += 1
     }
     ids.length = 0
     ids.push(...idsOut)
@@ -117,11 +107,6 @@ export async function writeVectors({
     packed.push(...packedOut)
     packedBin.length = 0
     packedBin.push(...packedBinOut)
-    if (packedInt8 && packedInt8Out) {
-      packedInt8.length = 0
-      packedInt8.push(...packedInt8Out)
-    }
-    clusterIds = clusterOut
   }
 
   const kvMetadata = [
@@ -132,23 +117,17 @@ export async function writeVectors({
     { key: 'hypvector.binary', value: String(binary) },
     { key: 'hypvector.count', value: String(ids.length) },
     { key: 'hypvector.clusters', value: String(centroids ? centroids.length : 0) },
-    { key: 'hypvector.int8', value: String(!!packedInt8) },
-    { key: 'hypvector.int8Scale', value: String(int8Scale) },
   ]
-  if (centroids && clusterIds) {
+  if (centroids && clusterCounts) {
     // Pack centroids as one contiguous Uint8Array, then base64-encode.
     const buf = new Uint8Array(centroids.length * binaryBytes)
     for (let c = 0; c < centroids.length; c += 1) buf.set(centroids[c], c * binaryBytes)
     kvMetadata.push({ key: 'hypvector.centroids', value: encodeBase64(buf) })
 
-    // Per-cluster row counts (Uint32, length = clusters). Rows are already
-    // sorted by cluster_id so cluster k occupies [cumsum[k], cumsum[k+1]).
-    // Storing counts (not offsets) keeps it small; reader computes cumsum.
-    const counts = new Uint32Array(centroids.length)
-    for (let i = 0; i < clusterIds.length; i += 1) counts[clusterIds[i]] += 1
+    // Per-cluster row counts. Cluster k spans [cumsum[k], cumsum[k+1]).
     kvMetadata.push({
       key: 'hypvector.clusterCounts',
-      value: encodeBase64(new Uint8Array(counts.buffer, counts.byteOffset, counts.byteLength)),
+      value: encodeBase64(new Uint8Array(clusterCounts.buffer, clusterCounts.byteOffset, clusterCounts.byteLength)),
     })
   }
 
@@ -175,19 +154,6 @@ export async function writeVectors({
       repetition_type: 'REQUIRED',
     }
   }
-  if (packedInt8) {
-    columnData.push({ name: defaultInt8Column, data: packedInt8 })
-    schemaOverrides[defaultInt8Column] = {
-      name: defaultInt8Column,
-      type: 'FIXED_LEN_BYTE_ARRAY',
-      type_length: dimension,
-      repetition_type: 'REQUIRED',
-    }
-  }
-  if (clusterIds) {
-    columnData.push({ name: defaultClusterColumn, data: new Int32Array(clusterIds) })
-  }
-
   const schemaInput = columnData.map(c => c.name === defaultIdColumn ? { ...c, type: /** @type {const} */ ('STRING') } : c)
   const schema = schemaFromColumnData({ columnData: schemaInput, schemaOverrides })
 

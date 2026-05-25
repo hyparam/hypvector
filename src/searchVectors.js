@@ -1,14 +1,12 @@
 import { asyncBufferFromFile, asyncBufferFromUrl, cachedAsyncBuffer, parquetMetadataAsync, parquetRead } from 'hyparquet'
 import { hammingDistanceBytes } from './cluster.js'
-import { defaultBinaryColumn, defaultClusterColumn, defaultClusterProbeFraction, defaultIdColumn, defaultInt8Column, defaultInt8WinnerRatio, defaultVectorColumn } from './constants.js'
+import { defaultBinaryColumn, defaultClusterProbeFraction, defaultIdColumn, defaultVectorColumn } from './constants.js'
 import {
   cosineSimilarity,
   dotProduct,
-  dotProductInt8,
   euclideanDistance,
   l2Normalize,
   packBinary,
-  packInt8,
   parseKvMetadata,
 } from './utils.js'
 
@@ -141,14 +139,11 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
   /** @type {{ rowIndex: number, hamming: number }[]} */
   const candidateHeap = []
 
-  // Decide which row ranges to scan in phase 1. With clusterCounts we know
-  // each cluster's exact contiguous row range; otherwise fall back to a full
-  // scan (or row-group skipping if only centroids are available).
+  // Decide which row ranges to scan in phase 1. With cluster metadata we
+  // know each cluster's exact contiguous row range; otherwise full scan.
   const scanRanges = meta.centroids && meta.clusterCounts
     ? selectClusterRowRanges(meta, queryBin, probe)
-    : meta.centroids
-      ? selectClusterRowGroupRanges(metadata, meta, queryBin, probe)
-      : [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
+    : [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
 
   // Phase 1: Hamming scan over selected ranges of the binary column.
   await Promise.all(scanRanges.map(({ rowStart, rowEnd }) => parquetRead({
@@ -166,17 +161,7 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
 
   if (candidateHeap.length === 0) return []
 
-  // Optional phase 1.5 (int8 cascade): if the file has an int8 column,
-  // use it to shrink the candidate pool BEFORE fetching float32. int8 is
-  // 4x smaller per row, so this trades a cheap int8 column read for a
-  // ~4x reduction in expensive float32 reads.
-  let candidateRows = [...new Set(candidateHeap.map(c => c.rowIndex))].sort((a, b) => a - b)
-  if (meta.hasInt8 && candidateRows.length > topK * defaultInt8WinnerRatio) {
-    candidateRows = await int8Cascade({
-      file, metadata, candidateRows, queryF32, dim,
-      scale: meta.int8Scale, scoringMetric, winners: topK * defaultInt8WinnerRatio,
-    })
-  }
+  const candidateRows = [...new Set(candidateHeap.map(c => c.rowIndex))].sort((a, b) => a - b)
   const wantedRows = new Set(candidateRows)
   const runs = coalesceRuns(candidateRows, 64)
 
@@ -223,72 +208,6 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
   // Phase 3: fetch ids for just the top-K winners.
   const ids = await fetchIds(file, metadata, winners.map(w => w.rowIndex))
   return winners.map((w, i) => ({ id: ids[i], score: w.score, rowIndex: w.rowIndex }))
-}
-
-/**
- * Score candidates with the int8-quantized column to shrink the pool
- * before phase 2's expensive float32 fetches. Returns the top-`winners`
- * rowIndices sorted ascending.
- *
- * For euclidean we still want closer = better, so we negate the int8
- * score so the standard "higher score is better" ordering works (only
- * dot/cosine make full sense for cascading; for euclidean we keep all
- * candidates rather than cascading suboptimally).
- *
- * @param {object} opts
- * @param {AsyncBuffer} opts.file
- * @param {FileMetaData} opts.metadata
- * @param {number[]} opts.candidateRows  (sorted ascending)
- * @param {Float32Array} opts.queryF32
- * @param {number} opts.dim
- * @param {number} opts.scale
- * @param {DistanceMetric} opts.scoringMetric
- * @param {number} opts.winners
- * @returns {Promise<number[]>}
- */
-async function int8Cascade({ file, metadata, candidateRows, queryF32, dim, scale, scoringMetric, winners }) {
-  // Cascade only helps for dot/cosine — euclidean approximation via int8
-  // dot product would be misleading.
-  if (scoringMetric === 'euclidean') return candidateRows
-
-  const queryI8 = packInt8(queryF32, scale)
-  const wanted = new Set(candidateRows)
-  const runs = coalesceRuns(candidateRows, 64)
-  /** @type {{ rowIndex: number, score: number }[]} */
-  const scored = []
-  const scratch = new Int8Array(dim)
-  const scratchBytes = new Uint8Array(scratch.buffer)
-
-  await Promise.all(runs.map(({ rowStart, rowEnd }) => parquetRead({
-    file,
-    metadata,
-    columns: [defaultInt8Column],
-    rowStart,
-    rowEnd,
-    useOffsetIndex: true,
-    onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
-      if (columnName !== defaultInt8Column) return
-      const rows = /** @type {Uint8Array[]} */ (columnData)
-      for (let i = 0; i < rows.length; i += 1) {
-        const rowIndex = chunkStart + i
-        if (!wanted.has(rowIndex)) continue
-        const bytes = rows[i]
-        /** @type {Int8Array} */
-        let cand
-        if (bytes.byteOffset % 1 === 0 && bytes.byteLength === dim) {
-          cand = new Int8Array(bytes.buffer, bytes.byteOffset, dim)
-        } else {
-          scratchBytes.set(bytes)
-          cand = scratch
-        }
-        scored.push({ rowIndex, score: dotProductInt8(queryI8, cand) })
-      }
-    },
-  })))
-
-  // Higher dot is better.
-  scored.sort((a, b) => b.score - a.score)
-  return scored.slice(0, winners).map(s => s.rowIndex).sort((a, b) => a - b)
 }
 
 /**
@@ -376,70 +295,6 @@ function selectClusterRowRanges(meta, queryBin, probe) {
 }
 
 /**
- * Fallback when only centroids are present (no clusterCounts). Uses parquet
- * row-group min/max statistics on the cluster_id column to skip row groups.
- *
- * @param {FileMetaData} metadata
- * @param {HypVectorMetadata} meta
- * @param {Uint8Array} queryBin
- * @param {number | undefined} probe
- * @returns {{ rowStart: number, rowEnd: number }[]}
- */
-function selectClusterRowGroupRanges(metadata, meta, queryBin, probe) {
-  const centroids = meta.centroids ?? []
-  if (centroids.length === 0) {
-    return [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
-  }
-  // Rank clusters by Hamming to query.
-  const clusterDist = new Array(centroids.length)
-  for (let c = 0; c < centroids.length; c += 1) {
-    clusterDist[c] = { cluster: c, hamming: hammingDistanceBytes(queryBin, centroids[c]) }
-  }
-  clusterDist.sort((a, b) => a.hamming - b.hamming)
-
-  const probeFraction = probe === undefined ? defaultClusterProbeFraction : probe
-  // probe in (0, 1] is a fraction of clusters (1.0 = all clusters);
-  // probe > 1 is an absolute count.
-  const targetClusters = probeFraction > 1
-    ? Math.min(Math.ceil(probeFraction), centroids.length)
-    : Math.max(1, Math.ceil(centroids.length * probeFraction))
-  const wantedClusters = new Set(clusterDist.slice(0, targetClusters).map(c => c.cluster))
-
-  // Find cluster_id column index and gather row-group ranges that overlap.
-  const clusterColIdx = findColumnIndex(metadata, defaultClusterColumn)
-  if (clusterColIdx < 0) {
-    return [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
-  }
-
-  /** @type {{ rowStart: number, rowEnd: number }[]} */
-  const ranges = []
-  let rowOffset = 0
-  for (const rg of metadata.row_groups) {
-    const rgRows = Number(rg.num_rows)
-    const stats = rg.columns[clusterColIdx]?.meta_data?.statistics
-    const min = readInt(stats?.min_value)
-    const max = readInt(stats?.max_value)
-    if (min === undefined || max === undefined) {
-      // No stats — must scan.
-      ranges.push({ rowStart: rowOffset, rowEnd: rowOffset + rgRows })
-    } else {
-      let overlaps = false
-      for (let c = min; c <= max; c += 1) {
-        if (wantedClusters.has(c)) { overlaps = true; break }
-      }
-      if (overlaps) ranges.push({ rowStart: rowOffset, rowEnd: rowOffset + rgRows })
-    }
-    rowOffset += rgRows
-  }
-  if (ranges.length === 0) {
-    // Shouldn't happen (we always include at least the nearest cluster), but
-    // fall back to a full scan to keep recall safe.
-    return [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
-  }
-  return mergeRanges(ranges)
-}
-
-/**
  * Merge adjacent/overlapping ranges.
  *
  * @param {{ rowStart: number, rowEnd: number }[]} ranges (already in order)
@@ -484,39 +339,6 @@ function coalesceRuns(rows, maxGap) {
   }
   runs.push({ rowStart: start, rowEnd: end })
   return runs
-}
-
-/**
- * @param {FileMetaData} metadata
- * @param {string} name
- * @returns {number}
- */
-function findColumnIndex(metadata, name) {
-  const rg = metadata.row_groups[0]
-  if (!rg) return -1
-  for (let i = 0; i < rg.columns.length; i += 1) {
-    const path = rg.columns[i].meta_data?.path_in_schema
-    if (path && path[path.length - 1] === name) return i
-  }
-  return -1
-}
-
-/**
- * Read an INT32 statistic value, which hyparquet may surface as a number,
- * a bigint, or a 4-byte Uint8Array.
- *
- * @param {any} v
- * @returns {number | undefined}
- */
-function readInt(v) {
-  if (v === undefined || v === null) return undefined
-  if (typeof v === 'number') return v
-  if (typeof v === 'bigint') return Number(v)
-  if (v instanceof Uint8Array && v.byteLength >= 4) {
-    const dv = new DataView(v.buffer, v.byteOffset, 4)
-    return dv.getInt32(0, true)
-  }
-  return undefined
 }
 
 /**
