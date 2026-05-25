@@ -44,6 +44,8 @@ export interface SearchVectorsOptions {
    *     (topK * rerankFactor) candidates, phase 2 fetches their float32
    *     vectors and reranks by exact metric. Default: 10.
    *   - rerankFactor = 0: forces the exact full-scan path (skip binary).
+   * Tune up as N grows: binary Hamming saturates, so bigger datasets
+   * need a wider candidate pool. ~N/3000 is a good starting point.
    * Ignored when the file has no binary column.
    */
   rerankFactor?: number
