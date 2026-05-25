@@ -46,6 +46,7 @@ for await (const r of readVectors({ file: seed, metadata: seedMeta })) {
 
 /**
  * @param {import('hyparquet').AsyncBuffer} buf
+ * @returns {import('hyparquet').AsyncBuffer & { bytes: number, fetches: number }}
  */
 function instrument(buf) {
   const origSlice = buf.slice.bind(buf)
@@ -78,7 +79,11 @@ async function suite(label, opts) {
     fetchesPer.push(raw.fetches)
   }
   times.sort((a, b) => a - b)
-  const p = (q) => times[Math.min(times.length - 1, Math.floor(q * times.length))]
+  /**
+   * @param {number} q
+   * @returns {number}
+   */
+  function p(q) { return times[Math.min(times.length - 1, Math.floor(q * times.length))] }
   const avg = times.reduce((a, b) => a + b, 0) / times.length
   const avgBytes = bytesPer.reduce((a, b) => a + b, 0) / bytesPer.length
   const avgFetches = fetchesPer.reduce((a, b) => a + b, 0) / fetchesPer.length
