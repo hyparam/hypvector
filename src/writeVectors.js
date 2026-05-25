@@ -3,6 +3,7 @@ import { binaryKMeans, reorderClustersByHamming } from './cluster.js'
 import {
   defaultBinaryColumn,
   defaultBinaryPageSize,
+  defaultClusteredRowGroupSize,
   defaultClusterIterations,
   defaultIdColumn,
   defaultRowGroupSize,
@@ -37,7 +38,7 @@ export async function writeVectors({
   writer,
   vectors,
   dimension,
-  rowGroupSize = defaultRowGroupSize,
+  rowGroupSize,
   metric = 'cosine',
   normalize = false,
   codec = 'UNCOMPRESSED',
@@ -56,6 +57,7 @@ export async function writeVectors({
   }
 
   const effectivePageSize = pageSize ?? (binary ? defaultBinaryPageSize : undefined)
+  const effectiveRowGroupSize = rowGroupSize ?? (clusters > 0 ? defaultClusteredRowGroupSize : defaultRowGroupSize)
   const binaryBytes = dimension + 7 >> 3
 
   /** @type {string[]} */
@@ -166,7 +168,7 @@ export async function writeVectors({
   await parquetWrite({
     writer,
     schema,
-    rowGroupSize,
+    rowGroupSize: effectiveRowGroupSize,
     kvMetadata,
     columnData,
     codec,

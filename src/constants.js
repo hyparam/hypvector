@@ -1,8 +1,16 @@
 // Version of the parquet vector format
 export const hypVectorVersion = 0
 
-// Default rows per row group when writing vectors
+// Default rows per row group when not clustered. Larger row groups mean
+// fewer fetches for a full exact scan, which dominates the no-cluster path.
 export const defaultRowGroupSize = 10000
+
+// Default rows per row group when clustered. Smaller row groups give the
+// search finer parallelism (each cluster's data fits in fewer row groups,
+// each row group's pages can be fetched in parallel). On a real HTTP
+// benchmark with RTT=20ms, this is ~18% faster than rg=10000 on the
+// clustered + rerank path.
+export const defaultClusteredRowGroupSize = 1000
 
 // Default name of the vector column
 export const defaultVectorColumn = 'vector'
