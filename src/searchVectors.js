@@ -1,12 +1,14 @@
 import { asyncBufferFromFile, asyncBufferFromUrl, cachedAsyncBuffer, parquetMetadataAsync, parquetRead } from 'hyparquet'
 import { hammingDistanceBytes } from './cluster.js'
-import { defaultBinaryColumn, defaultClusterColumn, defaultClusterProbeFraction, defaultIdColumn, defaultVectorColumn } from './constants.js'
+import { defaultBinaryColumn, defaultClusterColumn, defaultClusterProbeFraction, defaultIdColumn, defaultInt8Column, defaultInt8WinnerRatio, defaultVectorColumn } from './constants.js'
 import {
   cosineSimilarity,
   dotProduct,
+  dotProductInt8,
   euclideanDistance,
   l2Normalize,
   packBinary,
+  packInt8,
   parseKvMetadata,
 } from './utils.js'
 
@@ -164,10 +166,17 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
 
   if (candidateHeap.length === 0) return []
 
-  // Phase 2: read ONLY the float32 vectors for candidates (no ids — those
-  // are fetched in phase 3 for just the top-K winners, saving the id column
-  // reads that dominate phase 2 over the network).
-  const candidateRows = [...new Set(candidateHeap.map(c => c.rowIndex))].sort((a, b) => a - b)
+  // Optional phase 1.5 (int8 cascade): if the file has an int8 column,
+  // use it to shrink the candidate pool BEFORE fetching float32. int8 is
+  // 4x smaller per row, so this trades a cheap int8 column read for a
+  // ~4x reduction in expensive float32 reads.
+  let candidateRows = [...new Set(candidateHeap.map(c => c.rowIndex))].sort((a, b) => a - b)
+  if (meta.hasInt8 && candidateRows.length > topK * defaultInt8WinnerRatio) {
+    candidateRows = await int8Cascade({
+      file, metadata, candidateRows, queryF32, dim,
+      scale: meta.int8Scale, scoringMetric, winners: topK * defaultInt8WinnerRatio,
+    })
+  }
   const wantedRows = new Set(candidateRows)
   const runs = coalesceRuns(candidateRows, 64)
 
@@ -214,6 +223,72 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
   // Phase 3: fetch ids for just the top-K winners.
   const ids = await fetchIds(file, metadata, winners.map(w => w.rowIndex))
   return winners.map((w, i) => ({ id: ids[i], score: w.score, rowIndex: w.rowIndex }))
+}
+
+/**
+ * Score candidates with the int8-quantized column to shrink the pool
+ * before phase 2's expensive float32 fetches. Returns the top-`winners`
+ * rowIndices sorted ascending.
+ *
+ * For euclidean we still want closer = better, so we negate the int8
+ * score so the standard "higher score is better" ordering works (only
+ * dot/cosine make full sense for cascading; for euclidean we keep all
+ * candidates rather than cascading suboptimally).
+ *
+ * @param {object} opts
+ * @param {AsyncBuffer} opts.file
+ * @param {FileMetaData} opts.metadata
+ * @param {number[]} opts.candidateRows  (sorted ascending)
+ * @param {Float32Array} opts.queryF32
+ * @param {number} opts.dim
+ * @param {number} opts.scale
+ * @param {DistanceMetric} opts.scoringMetric
+ * @param {number} opts.winners
+ * @returns {Promise<number[]>}
+ */
+async function int8Cascade({ file, metadata, candidateRows, queryF32, dim, scale, scoringMetric, winners }) {
+  // Cascade only helps for dot/cosine — euclidean approximation via int8
+  // dot product would be misleading.
+  if (scoringMetric === 'euclidean') return candidateRows
+
+  const queryI8 = packInt8(queryF32, scale)
+  const wanted = new Set(candidateRows)
+  const runs = coalesceRuns(candidateRows, 64)
+  /** @type {{ rowIndex: number, score: number }[]} */
+  const scored = []
+  const scratch = new Int8Array(dim)
+  const scratchBytes = new Uint8Array(scratch.buffer)
+
+  await Promise.all(runs.map(({ rowStart, rowEnd }) => parquetRead({
+    file,
+    metadata,
+    columns: [defaultInt8Column],
+    rowStart,
+    rowEnd,
+    useOffsetIndex: true,
+    onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
+      if (columnName !== defaultInt8Column) return
+      const rows = /** @type {Uint8Array[]} */ (columnData)
+      for (let i = 0; i < rows.length; i += 1) {
+        const rowIndex = chunkStart + i
+        if (!wanted.has(rowIndex)) continue
+        const bytes = rows[i]
+        /** @type {Int8Array} */
+        let cand
+        if (bytes.byteOffset % 1 === 0 && bytes.byteLength === dim) {
+          cand = new Int8Array(bytes.buffer, bytes.byteOffset, dim)
+        } else {
+          scratchBytes.set(bytes)
+          cand = scratch
+        }
+        scored.push({ rowIndex, score: dotProductInt8(queryI8, cand) })
+      }
+    },
+  })))
+
+  // Higher dot is better.
+  scored.sort((a, b) => b.score - a.score)
+  return scored.slice(0, winners).map(s => s.rowIndex).sort((a, b) => a - b)
 }
 
 /**
