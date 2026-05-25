@@ -1,5 +1,6 @@
 import { asyncBufferFromFile, asyncBufferFromUrl, cachedAsyncBuffer, parquetMetadataAsync, parquetRead } from 'hyparquet'
-import { defaultBinaryColumn, defaultIdColumn, defaultVectorColumn } from './constants.js'
+import { hammingDistanceBytes } from './cluster.js'
+import { defaultBinaryColumn, defaultClusterColumn, defaultClusterProbeFraction, defaultIdColumn, defaultVectorColumn } from './constants.js'
 import {
   cosineSimilarity,
   dotProduct,
@@ -11,19 +12,20 @@ import {
 
 /**
  * @import { HypVectorMetadata, SearchResult, SearchVectorsOptions, DistanceMetric } from './types.js'
- * @import { AsyncBuffer, DecodedArray, FileMetaData } from 'hyparquet'
+ * @import { AsyncBuffer, DecodedArray, FileMetaData, RowGroup } from 'hyparquet'
  */
 
 /**
  * Find the top-k nearest neighbors to a query vector.
  *
- * Two paths:
+ * Three paths, in order of preference:
+ *   - Clustered + binary + rerank (file has centroids): phase 1 scans only
+ *     the top-N nearest clusters' row ranges (skipping whole row groups),
+ *     phase 2 fetches the candidate float32 vectors and reranks.
+ *   - Binary + rerank (binary column present, no clustering): full Hamming
+ *     scan in phase 1, then per-candidate float32 fetch + rerank in phase 2.
  *   - Exact (no binary column, or rerankFactor=0): single pass over the
- *     float32 vector column, scoring every row.
- *   - Binary + rerank (binary column present and rerankFactor>0):
- *     phase 1 scans the 1-bit-per-dim column with Hamming distance to pick
- *     topK * rerankFactor candidates, phase 2 reads the float32 vectors for
- *     the candidate row range and reranks under the exact metric.
+ *     float32 column, scoring every row.
  *
  * @param {SearchVectorsOptions} options
  * @returns {Promise<SearchResult[]>}
@@ -34,6 +36,7 @@ export async function searchVectors({
   topK = 10,
   metric,
   rerankFactor = 10,
+  probe,
   signal,
   asyncBufferFactory,
   sourceFile,
@@ -59,7 +62,7 @@ export async function searchVectors({
 
   if (meta.hasBinary && rerankFactor > 0) {
     return searchRerank({
-      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor,
+      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe,
     })
   }
   return searchExact({
@@ -107,11 +110,11 @@ async function searchExact({ file, metadata, meta, queryF32, scoringMetric, repo
 }
 
 /**
- * Binary + rerank path.
- *
- * Phase 1 scans the binary column with Hamming distance to pick candidates.
- * Phase 2 reads the float32 vectors for just the candidate row range and
- * reranks under the exact metric.
+ * Binary + rerank path. When the file has cluster centroids, phase 1
+ * restricts the scan to row ranges of the top-N nearest clusters and
+ * phase 2 issues coalesced reads spanning each contiguous candidate run.
+ * Without clustering, falls back to a full binary scan and per-candidate
+ * point reads in phase 2.
  *
  * @param {object} options
  * @param {AsyncBuffer} options.file
@@ -122,81 +125,285 @@ async function searchExact({ file, metadata, meta, queryF32, scoringMetric, repo
  * @param {DistanceMetric} options.reportedMetric
  * @param {number} options.topK
  * @param {number} options.rerankFactor
+ * @param {number | undefined} options.probe
  * @returns {Promise<SearchResult[]>}
  */
-async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK, rerankFactor }) {
+async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK, rerankFactor, probe }) {
   const dim = meta.dimension
   const binaryBytes = (dim + 7) >> 3
   const candidatesK = Math.max(topK * rerankFactor, topK)
 
-  // Phase 1: Hamming scan over binary column.
   const queryBin = packBinary(queryF32, dim)
   const queryBinU32 = bytesToAlignedU32(queryBin)
+
   /** @type {{ rowIndex: number, hamming: number }[]} */
   const candidateHeap = []
 
-  await parquetRead({
+  // Decide which row ranges to scan in phase 1. With clusterCounts we know
+  // each cluster's exact contiguous row range; otherwise fall back to a full
+  // scan (or row-group skipping if only centroids are available).
+  const scanRanges = meta.centroids && meta.clusterCounts
+    ? selectClusterRowRanges(meta, queryBin, probe)
+    : meta.centroids
+      ? selectClusterRowGroupRanges(metadata, meta, queryBin, probe)
+      : [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
+
+  // Phase 1: Hamming scan over selected ranges of the binary column.
+  await Promise.all(scanRanges.map(({ rowStart, rowEnd }) => parquetRead({
     file,
     metadata,
     columns: [defaultBinaryColumn],
-    onChunk: ({ columnName, columnData, rowStart }) => {
+    rowStart,
+    rowEnd,
+    useOffsetIndex: true,
+    onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
       if (columnName !== defaultBinaryColumn) return
-      hammingScoreChunk(columnData, rowStart, binaryBytes, queryBinU32, candidateHeap, candidatesK)
+      hammingScoreChunk(columnData, chunkStart, binaryBytes, queryBinU32, candidateHeap, candidatesK)
     },
-  })
+  })))
 
   if (candidateHeap.length === 0) return []
 
-  // Phase 2: per-candidate single-row reads with useOffsetIndex. Each
-  // parquetRead fetches only the data page containing that row. With small
-  // page sizes this is the network-optimal pattern; the cached buffer dedups
-  // repeated reads of footer + offset indexes across the K parallel calls.
+  // Phase 2: read float32 vectors for candidates. When candidates cluster
+  // spatially (typical with sorted/clustered data), coalesce into a few
+  // contiguous range reads instead of one read per candidate.
   const candidateRows = [...new Set(candidateHeap.map(c => c.rowIndex))].sort((a, b) => a - b)
+  const wantedRows = new Set(candidateRows)
+  const runs = coalesceRuns(candidateRows, 64)
   const decoder = new TextDecoder()
 
-  const scored = await Promise.all(candidateRows.map(async rowIndex => {
-    /** @type {Float32Array | null} */
-    let vector = null
-    /** @type {string | undefined} */
-    let id
+  /** @type {{ rowIndex: number, score: number, id: string }[]} */
+  const scored = []
+
+  await Promise.all(runs.map(async ({ rowStart, rowEnd }) => {
+    /** @type {Map<number, { id?: string, vector?: Float32Array }>} */
+    const local = new Map()
     await parquetRead({
       file,
       metadata,
       columns: [defaultIdColumn, defaultVectorColumn],
-      rowStart: rowIndex,
-      rowEnd: rowIndex + 1,
+      rowStart,
+      rowEnd,
       useOffsetIndex: true,
       onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
-        const idx = rowIndex - chunkStart
-        if (idx < 0 || idx >= columnData.length) return
-        if (columnName === defaultIdColumn) {
-          const raw = /** @type {any} */ (columnData)[idx]
-          id = typeof raw === 'string' ? raw : decoder.decode(raw)
-        } else if (columnName === defaultVectorColumn) {
-          const bytes = /** @type {Uint8Array[]} */ (columnData)[idx]
-          if (bytes.byteOffset % 4 === 0) {
-            vector = new Float32Array(bytes.buffer, bytes.byteOffset, dim)
-          } else {
-            vector = new Float32Array(dim)
-            new Uint8Array(vector.buffer).set(bytes)
+        for (let i = 0; i < columnData.length; i += 1) {
+          const rowIndex = chunkStart + i
+          if (!wantedRows.has(rowIndex)) continue
+          let entry = local.get(rowIndex)
+          if (!entry) { entry = {}; local.set(rowIndex, entry) }
+          if (columnName === defaultIdColumn) {
+            const raw = /** @type {any} */ (columnData)[i]
+            entry.id = typeof raw === 'string' ? raw : decoder.decode(raw)
+          } else if (columnName === defaultVectorColumn) {
+            const bytes = /** @type {Uint8Array[]} */ (columnData)[i]
+            if (bytes.byteOffset % 4 === 0) {
+              entry.vector = new Float32Array(bytes.buffer, bytes.byteOffset, dim)
+            } else {
+              const copy = new Float32Array(dim)
+              new Uint8Array(copy.buffer).set(bytes)
+              entry.vector = copy
+            }
           }
         }
       },
     })
-    if (!vector) return null
-    return {
-      rowIndex,
-      id: id ?? String(rowIndex),
-      score: computeScore(queryF32, vector, scoringMetric),
+    for (const [rowIndex, entry] of local) {
+      if (!entry.vector) continue
+      scored.push({
+        rowIndex,
+        id: entry.id ?? String(rowIndex),
+        score: computeScore(queryF32, entry.vector, scoringMetric),
+      })
     }
   }))
 
-  const valid = /** @type {{ rowIndex: number, score: number, id: string }[]} */ (
-    scored.filter(r => r !== null)
-  )
   const dir = reportedMetric === 'euclidean' ? 1 : -1
-  valid.sort((a, b) => dir * (a.score - b.score))
-  return valid.slice(0, topK).map(({ id, score, rowIndex }) => ({ id, score, rowIndex }))
+  scored.sort((a, b) => dir * (a.score - b.score))
+  return scored.slice(0, topK).map(({ id, score, rowIndex }) => ({ id, score, rowIndex }))
+}
+
+/**
+ * Pick exact contiguous row ranges based on cluster nearness to the query.
+ * Uses `clusterCounts` KV metadata: since rows are sorted by cluster id,
+ * cluster k occupies [cumsum[k], cumsum[k+1]). We pick the top-N nearest
+ * clusters (by Hamming centroid distance), then merge their contiguous
+ * row ranges so useOffsetIndex fetches only the pages that cover them.
+ *
+ * @param {HypVectorMetadata} meta
+ * @param {Uint8Array} queryBin
+ * @param {number | undefined} probe
+ * @returns {{ rowStart: number, rowEnd: number }[]}
+ */
+function selectClusterRowRanges(meta, queryBin, probe) {
+  const centroids = meta.centroids ?? []
+  const counts = meta.clusterCounts
+  if (centroids.length === 0 || !counts) return [{ rowStart: 0, rowEnd: meta.count }]
+
+  // Cumulative offsets so cluster k spans [offset[k], offset[k+1]).
+  const offsets = new Uint32Array(centroids.length + 1)
+  for (let c = 0; c < centroids.length; c += 1) offsets[c + 1] = offsets[c] + counts[c]
+
+  // Rank clusters by Hamming to query.
+  const clusterDist = new Array(centroids.length)
+  for (let c = 0; c < centroids.length; c += 1) {
+    clusterDist[c] = { cluster: c, hamming: hammingDistanceBytes(queryBin, centroids[c]) }
+  }
+  clusterDist.sort((a, b) => a.hamming - b.hamming)
+
+  const probeFraction = probe === undefined ? defaultClusterProbeFraction : probe
+  const targetClusters = probeFraction >= 1
+    ? Math.min(Math.ceil(probeFraction), centroids.length)
+    : Math.max(1, Math.ceil(centroids.length * probeFraction))
+
+  const wanted = clusterDist.slice(0, targetClusters).map(c => c.cluster).sort((a, b) => a - b)
+  /** @type {{ rowStart: number, rowEnd: number }[]} */
+  const ranges = []
+  for (const c of wanted) {
+    ranges.push({ rowStart: offsets[c], rowEnd: offsets[c + 1] })
+  }
+  return mergeRanges(ranges)
+}
+
+/**
+ * Fallback when only centroids are present (no clusterCounts). Uses parquet
+ * row-group min/max statistics on the cluster_id column to skip row groups.
+ *
+ * @param {FileMetaData} metadata
+ * @param {HypVectorMetadata} meta
+ * @param {Uint8Array} queryBin
+ * @param {number | undefined} probe
+ * @returns {{ rowStart: number, rowEnd: number }[]}
+ */
+function selectClusterRowGroupRanges(metadata, meta, queryBin, probe) {
+  const centroids = meta.centroids ?? []
+  if (centroids.length === 0) {
+    return [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
+  }
+  // Rank clusters by Hamming to query.
+  const clusterDist = new Array(centroids.length)
+  for (let c = 0; c < centroids.length; c += 1) {
+    clusterDist[c] = { cluster: c, hamming: hammingDistanceBytes(queryBin, centroids[c]) }
+  }
+  clusterDist.sort((a, b) => a.hamming - b.hamming)
+
+  const probeFraction = probe === undefined ? defaultClusterProbeFraction : probe
+  const targetClusters = probeFraction >= 1
+    ? Math.min(Math.ceil(probeFraction), centroids.length)
+    : Math.max(1, Math.ceil(centroids.length * probeFraction))
+  const wantedClusters = new Set(clusterDist.slice(0, targetClusters).map(c => c.cluster))
+
+  // Find cluster_id column index and gather row-group ranges that overlap.
+  const clusterColIdx = findColumnIndex(metadata, defaultClusterColumn)
+  if (clusterColIdx < 0) {
+    return [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
+  }
+
+  /** @type {{ rowStart: number, rowEnd: number }[]} */
+  const ranges = []
+  let rowOffset = 0
+  for (const rg of metadata.row_groups) {
+    const rgRows = Number(rg.num_rows)
+    const stats = rg.columns[clusterColIdx]?.meta_data?.statistics
+    const min = readInt(stats?.min_value)
+    const max = readInt(stats?.max_value)
+    if (min === undefined || max === undefined) {
+      // No stats — must scan.
+      ranges.push({ rowStart: rowOffset, rowEnd: rowOffset + rgRows })
+    } else {
+      let overlaps = false
+      for (let c = min; c <= max; c += 1) {
+        if (wantedClusters.has(c)) { overlaps = true; break }
+      }
+      if (overlaps) ranges.push({ rowStart: rowOffset, rowEnd: rowOffset + rgRows })
+    }
+    rowOffset += rgRows
+  }
+  if (ranges.length === 0) {
+    // Shouldn't happen (we always include at least the nearest cluster), but
+    // fall back to a full scan to keep recall safe.
+    return [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
+  }
+  return mergeRanges(ranges)
+}
+
+/**
+ * Merge adjacent/overlapping ranges.
+ *
+ * @param {{ rowStart: number, rowEnd: number }[]} ranges (already in order)
+ * @returns {{ rowStart: number, rowEnd: number }[]}
+ */
+function mergeRanges(ranges) {
+  /** @type {{ rowStart: number, rowEnd: number }[]} */
+  const out = []
+  for (const r of ranges) {
+    const last = out[out.length - 1]
+    if (last && r.rowStart <= last.rowEnd) {
+      if (r.rowEnd > last.rowEnd) last.rowEnd = r.rowEnd
+    } else {
+      out.push({ ...r })
+    }
+  }
+  return out
+}
+
+/**
+ * Group a sorted list of row indices into contiguous runs, merging runs
+ * whose gap is <= maxGap. Each run becomes one parquetRead call.
+ *
+ * @param {number[]} rows (sorted ascending)
+ * @param {number} maxGap
+ * @returns {{ rowStart: number, rowEnd: number }[]}
+ */
+function coalesceRuns(rows, maxGap) {
+  if (rows.length === 0) return []
+  /** @type {{ rowStart: number, rowEnd: number }[]} */
+  const runs = []
+  let start = rows[0]
+  let end = rows[0] + 1
+  for (let i = 1; i < rows.length; i += 1) {
+    if (rows[i] - end <= maxGap) {
+      end = rows[i] + 1
+    } else {
+      runs.push({ rowStart: start, rowEnd: end })
+      start = rows[i]
+      end = rows[i] + 1
+    }
+  }
+  runs.push({ rowStart: start, rowEnd: end })
+  return runs
+}
+
+/**
+ * @param {FileMetaData} metadata
+ * @param {string} name
+ * @returns {number}
+ */
+function findColumnIndex(metadata, name) {
+  const rg = metadata.row_groups[0]
+  if (!rg) return -1
+  for (let i = 0; i < rg.columns.length; i += 1) {
+    const path = rg.columns[i].meta_data?.path_in_schema
+    if (path && path[path.length - 1] === name) return i
+  }
+  return -1
+}
+
+/**
+ * Read an INT32 statistic value, which hyparquet may surface as a number,
+ * a bigint, or a 4-byte Uint8Array.
+ *
+ * @param {any} v
+ * @returns {number | undefined}
+ */
+function readInt(v) {
+  if (v === undefined || v === null) return undefined
+  if (typeof v === 'number') return v
+  if (typeof v === 'bigint') return Number(v)
+  if (v instanceof Uint8Array && v.byteLength >= 4) {
+    const dv = new DataView(v.buffer, v.byteOffset, 4)
+    return dv.getInt32(0, true)
+  }
+  return undefined
 }
 
 /**
