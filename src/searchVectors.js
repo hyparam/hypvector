@@ -1,26 +1,29 @@
 import { asyncBufferFromFile, asyncBufferFromUrl, parquetMetadataAsync, parquetRead } from 'hyparquet'
-import { defaultIdColumn, defaultVectorColumn } from './constants.js'
+import { defaultBinaryColumn, defaultIdColumn, defaultVectorColumn } from './constants.js'
 import {
   cosineSimilarity,
   dotProduct,
   euclideanDistance,
   l2Normalize,
+  packBinary,
   parseKvMetadata,
 } from './utils.js'
 
 /**
- * @import { SearchResult, SearchVectorsOptions, DistanceMetric } from './types.js'
- * @import { AsyncBuffer, DecodedArray } from 'hyparquet'
+ * @import { HypVectorMetadata, SearchResult, SearchVectorsOptions, DistanceMetric } from './types.js'
+ * @import { AsyncBuffer, DecodedArray, FileMetaData } from 'hyparquet'
  */
 
 /**
  * Find the top-k nearest neighbors to a query vector.
  *
- * Reads vector and id columns via parquetRead's onChunk callback so we avoid
- * the per-row JS object materialization that parquetReadObjects pays. Within
- * a row group, FIXED_LEN_BYTE_ARRAY decode hands us a Uint8Array[] backed by
- * a single contiguous buffer; we score it via aligned Float32Array views
- * with zero per-row allocations.
+ * Two paths:
+ *   - Exact (no binary column, or rerankFactor=0): single pass over the
+ *     float32 vector column, scoring every row.
+ *   - Binary + rerank (binary column present and rerankFactor>0):
+ *     phase 1 scans the 1-bit-per-dim column with Hamming distance to pick
+ *     topK * rerankFactor candidates, phase 2 reads the float32 vectors for
+ *     the candidate row range and reranks under the exact metric.
  *
  * @param {SearchVectorsOptions} options
  * @returns {Promise<SearchResult[]>}
@@ -30,6 +33,7 @@ export async function searchVectors({
   url,
   topK = 10,
   metric,
+  rerankFactor = 10,
   signal,
   asyncBufferFactory,
   sourceFile,
@@ -44,21 +48,39 @@ export async function searchVectors({
     throw new Error(`query has dimension ${query.length}, file expects ${meta.dimension}`)
   }
   const requestedMetric = metric ?? meta.metric
-  const dim = meta.dimension
   let queryF32 = query instanceof Float32Array ? query : Float32Array.from(query)
 
   // When stored vectors are pre-normalized, cosine == dot(query/||query||, candidate).
-  // Pre-normalize the query once and score with dot product to skip the per-candidate
-  // sqrt/normalize hot loop inside cosineSimilarity.
   let scoringMetric = requestedMetric
   if (requestedMetric === 'cosine' && meta.normalized) {
     queryF32 = l2Normalize(queryF32)
     scoringMetric = 'dot'
   }
-  // Report scores under the user-requested metric (cosine and dot agree numerically
-  // here because both query and candidates are unit vectors).
-  const reportedMetric = requestedMetric
 
+  if (meta.hasBinary && rerankFactor > 0) {
+    return searchRerank({
+      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor,
+    })
+  }
+  return searchExact({
+    file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK,
+  })
+}
+
+/**
+ * Exact full-scan path (no binary column).
+ *
+ * @param {object} options
+ * @param {AsyncBuffer} options.file
+ * @param {FileMetaData} options.metadata
+ * @param {HypVectorMetadata} options.meta
+ * @param {Float32Array} options.queryF32
+ * @param {DistanceMetric} options.scoringMetric
+ * @param {DistanceMetric} options.reportedMetric
+ * @param {number} options.topK
+ * @returns {Promise<SearchResult[]>}
+ */
+async function searchExact({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK }) {
   /** @type {{ rowIndex: number, score: number }[]} */
   const heap = []
   /** @type {{ start: number, ids: string[] }[]} */
@@ -70,15 +92,14 @@ export async function searchVectors({
     columns: [defaultIdColumn, defaultVectorColumn],
     onChunk: ({ columnName, columnData, rowStart }) => {
       if (columnName === defaultVectorColumn) {
-        scoreChunk(columnData, rowStart, dim, queryF32, scoringMetric, heap, topK)
+        scoreVectorChunk(columnData, rowStart, meta.dimension, queryF32, scoringMetric, heap, topK)
       } else if (columnName === defaultIdColumn) {
         idChunks.push({ start: rowStart, ids: /** @type {string[]} */ (columnData) })
       }
     },
   })
 
-  const ordered = sortHeap(heap, reportedMetric)
-  return ordered.map(({ rowIndex, score }) => ({
+  return sortHeap(heap, reportedMetric).map(({ rowIndex, score }) => ({
     id: lookupId(idChunks, rowIndex) ?? String(rowIndex),
     score,
     rowIndex,
@@ -86,7 +107,84 @@ export async function searchVectors({
 }
 
 /**
- * Score every row in a chunk and update the running top-k heap.
+ * Binary + rerank path.
+ *
+ * Phase 1 scans the binary column with Hamming distance to pick candidates.
+ * Phase 2 reads the float32 vectors for just the candidate row range and
+ * reranks under the exact metric.
+ *
+ * @param {object} options
+ * @param {AsyncBuffer} options.file
+ * @param {FileMetaData} options.metadata
+ * @param {HypVectorMetadata} options.meta
+ * @param {Float32Array} options.queryF32
+ * @param {DistanceMetric} options.scoringMetric
+ * @param {DistanceMetric} options.reportedMetric
+ * @param {number} options.topK
+ * @param {number} options.rerankFactor
+ * @returns {Promise<SearchResult[]>}
+ */
+async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK, rerankFactor }) {
+  const dim = meta.dimension
+  const binaryBytes = (dim + 7) >> 3
+  const candidatesK = Math.max(topK * rerankFactor, topK)
+
+  // Phase 1: Hamming scan over binary column.
+  const queryBin = packBinary(queryF32, dim)
+  const queryBinU32 = bytesToAlignedU32(queryBin)
+  /** @type {{ rowIndex: number, hamming: number }[]} */
+  const candidateHeap = []
+
+  await parquetRead({
+    file,
+    metadata,
+    columns: [defaultBinaryColumn],
+    onChunk: ({ columnName, columnData, rowStart }) => {
+      if (columnName !== defaultBinaryColumn) return
+      hammingScoreChunk(columnData, rowStart, binaryBytes, queryBinU32, candidateHeap, candidatesK)
+    },
+  })
+
+  if (candidateHeap.length === 0) return []
+
+  // Phase 2: rerank float32 vectors for candidate row range.
+  const candidateSet = new Set(candidateHeap.map(c => c.rowIndex))
+  let minRow = Infinity
+  let maxRow = -1
+  for (const c of candidateHeap) {
+    if (c.rowIndex < minRow) minRow = c.rowIndex
+    if (c.rowIndex > maxRow) maxRow = c.rowIndex
+  }
+
+  /** @type {{ rowIndex: number, score: number }[]} */
+  const heap = []
+  /** @type {{ start: number, ids: string[] }[]} */
+  const idChunks = []
+
+  await parquetRead({
+    file,
+    metadata,
+    columns: [defaultIdColumn, defaultVectorColumn],
+    rowStart: minRow,
+    rowEnd: maxRow + 1,
+    onChunk: ({ columnName, columnData, rowStart }) => {
+      if (columnName === defaultVectorColumn) {
+        rerankVectorChunk(columnData, rowStart, dim, queryF32, scoringMetric, candidateSet, heap, topK)
+      } else if (columnName === defaultIdColumn) {
+        idChunks.push({ start: rowStart, ids: /** @type {string[]} */ (columnData) })
+      }
+    },
+  })
+
+  return sortHeap(heap, reportedMetric).map(({ rowIndex, score }) => ({
+    id: lookupId(idChunks, rowIndex) ?? String(rowIndex),
+    score,
+    rowIndex,
+  }))
+}
+
+/**
+ * Score every row in a vector chunk and update the top-k heap.
  *
  * @param {DecodedArray} columnData
  * @param {number} rowStart
@@ -96,32 +194,139 @@ export async function searchVectors({
  * @param {{ rowIndex: number, score: number }[]} heap
  * @param {number} topK
  */
-function scoreChunk(columnData, rowStart, dim, query, metric, heap, topK) {
+function scoreVectorChunk(columnData, rowStart, dim, query, metric, heap, topK) {
   const rows = /** @type {Uint8Array[]} */ (columnData)
   if (rows.length === 0) return
-
-  // All rows in a chunk share a backing ArrayBuffer laid out contiguously.
-  // If the chunk start is 4-byte aligned, view it as one big Float32Array
-  // and stride by `dim`. Otherwise, copy each row into a reused scratch.
   const first = rows[0]
   if (first.byteOffset % 4 === 0) {
     const flat = new Float32Array(first.buffer, first.byteOffset, rows.length * dim)
     for (let i = 0; i < rows.length; i += 1) {
-      const offset = i * dim
-      const candidate = flat.subarray(offset, offset + dim)
-      const score = computeScore(query, candidate, metric)
-      pushHeap(heap, { rowIndex: rowStart + i, score }, topK, metric)
+      const candidate = flat.subarray(i * dim, (i + 1) * dim)
+      pushHeap(heap, { rowIndex: rowStart + i, score: computeScore(query, candidate, metric) }, topK, metric)
     }
     return
   }
-
   const scratch = new Float32Array(dim)
   const scratchBytes = new Uint8Array(scratch.buffer)
   for (let i = 0; i < rows.length; i += 1) {
     scratchBytes.set(rows[i])
-    const score = computeScore(query, scratch, metric)
-    pushHeap(heap, { rowIndex: rowStart + i, score }, topK, metric)
+    pushHeap(heap, { rowIndex: rowStart + i, score: computeScore(query, scratch, metric) }, topK, metric)
   }
+}
+
+/**
+ * Score only the rows of a vector chunk that are in the candidate set.
+ *
+ * @param {DecodedArray} columnData
+ * @param {number} rowStart
+ * @param {number} dim
+ * @param {Float32Array} query
+ * @param {DistanceMetric} metric
+ * @param {Set<number>} candidateSet
+ * @param {{ rowIndex: number, score: number }[]} heap
+ * @param {number} topK
+ */
+function rerankVectorChunk(columnData, rowStart, dim, query, metric, candidateSet, heap, topK) {
+  const rows = /** @type {Uint8Array[]} */ (columnData)
+  if (rows.length === 0) return
+  const first = rows[0]
+  const aligned = first.byteOffset % 4 === 0
+  const flat = aligned ? new Float32Array(first.buffer, first.byteOffset, rows.length * dim) : null
+  const scratch = aligned ? null : new Float32Array(dim)
+  const scratchBytes = scratch ? new Uint8Array(scratch.buffer) : null
+  for (let i = 0; i < rows.length; i += 1) {
+    const rowIndex = rowStart + i
+    if (!candidateSet.has(rowIndex)) continue
+    let candidate
+    if (flat) {
+      candidate = flat.subarray(i * dim, (i + 1) * dim)
+    } else if (scratchBytes && scratch) {
+      scratchBytes.set(rows[i])
+      candidate = scratch
+    } else {
+      continue
+    }
+    pushHeap(heap, { rowIndex, score: computeScore(query, candidate, metric) }, topK, metric)
+  }
+}
+
+/**
+ * Hamming-score every row in a binary chunk and update the candidate heap.
+ *
+ * @param {DecodedArray} columnData
+ * @param {number} rowStart
+ * @param {number} bytesPerRow
+ * @param {Uint32Array} queryU32
+ * @param {{ rowIndex: number, hamming: number }[]} heap
+ * @param {number} candidatesK
+ */
+function hammingScoreChunk(columnData, rowStart, bytesPerRow, queryU32, heap, candidatesK) {
+  const rows = /** @type {Uint8Array[]} */ (columnData)
+  if (rows.length === 0) return
+  const wordsPerRow = bytesPerRow >> 2
+  const first = rows[0]
+  const aligned = first.byteOffset % 4 === 0
+  const flat = aligned ? new Uint32Array(first.buffer, first.byteOffset, rows.length * wordsPerRow) : null
+  const scratchU32 = aligned ? null : new Uint32Array(wordsPerRow)
+  const scratchBytes = scratchU32 ? new Uint8Array(scratchU32.buffer) : null
+
+  for (let i = 0; i < rows.length; i += 1) {
+    /** @type {Uint32Array} */
+    let candidate
+    if (flat) {
+      candidate = flat.subarray(i * wordsPerRow, (i + 1) * wordsPerRow)
+    } else if (scratchBytes && scratchU32) {
+      scratchBytes.set(rows[i])
+      candidate = scratchU32
+    } else {
+      continue
+    }
+    let d = 0
+    for (let j = 0; j < wordsPerRow; j += 1) {
+      let v = candidate[j] ^ queryU32[j]
+      v = v - (v >>> 1 & 0x55555555)
+      v = (v & 0x33333333) + (v >>> 2 & 0x33333333)
+      d += (v + (v >>> 4) & 0x0f0f0f0f) * 0x01010101 >>> 24
+    }
+    pushHammingHeap(heap, { rowIndex: rowStart + i, hamming: d }, candidatesK)
+  }
+}
+
+/**
+ * Bounded heap for Hamming candidates (lower hamming is better).
+ *
+ * @param {{ rowIndex: number, hamming: number }[]} heap
+ * @param {{ rowIndex: number, hamming: number }} candidate
+ * @param {number} candidatesK
+ */
+function pushHammingHeap(heap, candidate, candidatesK) {
+  if (heap.length < candidatesK) {
+    heap.push(candidate)
+    return
+  }
+  let worstIdx = 0
+  for (let i = 1; i < heap.length; i += 1) {
+    if (heap[i].hamming > heap[worstIdx].hamming) worstIdx = i
+  }
+  if (candidate.hamming < heap[worstIdx].hamming) {
+    heap[worstIdx] = candidate
+  }
+}
+
+/**
+ * Return a Uint32Array view of a Uint8Array. Copies if the source byteOffset
+ * isn't 4-byte aligned (Uint32Array requires alignment).
+ *
+ * @param {Uint8Array} bytes
+ * @returns {Uint32Array}
+ */
+function bytesToAlignedU32(bytes) {
+  if (bytes.byteOffset % 4 === 0 && bytes.byteLength % 4 === 0) {
+    return new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 2)
+  }
+  const copy = new Uint8Array(bytes.byteLength)
+  copy.set(bytes)
+  return new Uint32Array(copy.buffer, 0, bytes.byteLength >> 2)
 }
 
 /**
@@ -172,7 +377,6 @@ function computeScore(a, b, metric) {
 
 /**
  * Return true if `a` is "better" than `b` under the metric.
- * For cosine/dot, higher is better. For euclidean, lower is better.
  *
  * @param {number} a
  * @param {number} b
@@ -185,8 +389,7 @@ function isBetter(a, b, metric) {
 }
 
 /**
- * Naive bounded "heap": keep an unsorted array of at most topK items and
- * track the worst by linear scan. Plenty fast for v0 + small topK.
+ * Bounded heap by score (uses metric to decide "better").
  *
  * @param {{ rowIndex: number, score: number }[]} heap
  * @param {{ rowIndex: number, score: number }} candidate

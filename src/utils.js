@@ -99,6 +99,57 @@ export function packFloat32(v) {
 }
 
 /**
+ * Pack a vector into a 1-bit-per-dimension binary code (sign bits).
+ * Bit i of byte (i >> 3) is 1 iff v[i] >= 0. Length is ceil(dim/8) bytes.
+ *
+ * @param {Float32Array | number[]} v
+ * @param {number} [dim] optional explicit dimension (defaults to v.length)
+ * @returns {Uint8Array}
+ */
+export function packBinary(v, dim = v.length) {
+  const bytes = new Uint8Array((dim + 7) >> 3)
+  for (let i = 0; i < dim; i += 1) {
+    if (v[i] >= 0) bytes[i >> 3] |= 1 << (i & 7)
+  }
+  return bytes
+}
+
+/**
+ * Population count of a 32-bit integer (number of set bits).
+ * Uses the standard SWAR bit-twiddling trick.
+ *
+ * @param {number} v
+ * @returns {number}
+ */
+export function popcount32(v) {
+  v = v - (v >>> 1 & 0x55555555)
+  v = (v & 0x33333333) + (v >>> 2 & 0x33333333)
+  return (v + (v >>> 4) & 0x0f0f0f0f) * 0x01010101 >>> 24
+}
+
+/**
+ * Hamming distance between two equal-length Uint32 arrays
+ * (interpreted as packed bit strings).
+ *
+ * @param {Uint32Array} a
+ * @param {Uint32Array} b
+ * @returns {number}
+ */
+export function hammingDistanceU32(a, b) {
+  if (a.length !== b.length) {
+    throw new Error(`u32 length mismatch: ${a.length} vs ${b.length}`)
+  }
+  let d = 0
+  for (let i = 0; i < a.length; i += 1) {
+    let v = a[i] ^ b[i]
+    v = v - (v >>> 1 & 0x55555555)
+    v = (v & 0x33333333) + (v >>> 2 & 0x33333333)
+    d += (v + (v >>> 4) & 0x0f0f0f0f) * 0x01010101 >>> 24
+  }
+  return d
+}
+
+/**
  * Unpack a Uint8Array of raw little-endian float32 bytes into a Float32Array.
  * Always returns a fresh aligned copy, since the source buffer may be
  * misaligned for a Float32Array view.
@@ -131,9 +182,10 @@ export function parseKvMetadata(metadata) {
   const dimension = parseInt(kv['hypvector.dimension'] ?? '0', 10)
   const metric = /** @type {HypVectorMetadata['metric']} */ (kv['hypvector.metric'] ?? 'cosine')
   const normalized = kv['hypvector.normalized'] === 'true'
+  const hasBinary = kv['hypvector.binary'] === 'true'
   const count = Number(metadata.num_rows)
   if (!dimension) {
     throw new Error('Not a hypvector parquet file: missing hypvector.dimension metadata')
   }
-  return { version, dimension, metric, normalized, count }
+  return { version, dimension, metric, normalized, hasBinary, count }
 }

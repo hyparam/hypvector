@@ -8,7 +8,7 @@ const DEST = 'data/wiki_en.vectors.parquet'
 const MODEL = 'Xenova/all-MiniLM-L6-v2'
 const DIMENSION = 384
 const BATCH = 32
-const LIMIT = parseInt(process.argv[2] ?? '10000', 10)
+const LIMIT = parseInt(process.argv[2] ?? '50000', 10)
 const TEXT_COLUMN = process.argv[3] ?? 'title'
 
 const sourceStat = await fs.stat(SOURCE).catch(() => undefined)
@@ -78,6 +78,8 @@ await writeVectors({
   vectors: embedAll(),
   // Extractor already normalizes; setting the flag records that in kv metadata.
   normalize: true,
+  // Also write 1-bit-per-dim sign codes for binary+rerank search.
+  binary: true,
 })
 
 const stat = await fs.stat(DEST)

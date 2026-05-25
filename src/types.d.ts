@@ -17,6 +17,7 @@ export interface WriteVectorsOptions {
   metric?: DistanceMetric // hint stored in kv metadata (default: 'cosine')
   normalize?: boolean // l2-normalize vectors on write (default: false)
   codec?: CompressionCodec // parquet codec (default: 'UNCOMPRESSED'; SNAPPY/ZSTD rarely shrink float embeddings and cost ~2-3x query latency)
+  binary?: boolean // also write a 1-bit-per-dim sign-bit column for binary+rerank search (default: false; adds ~1.5% file size at 384-dim)
 }
 
 export interface ReadVectorsOptions {
@@ -32,6 +33,16 @@ export interface SearchVectorsOptions {
   url: string // URL or file path to the source parquet file
   topK?: number // number of nearest neighbors to return (default: 10)
   metric?: DistanceMetric // override the stored metric
+
+  /**
+   * When the file has a binary column, controls two-phase search:
+   *   - rerankFactor > 0: phase 1 scans 1-bit codes (Hamming), keeps top
+   *     (topK * rerankFactor) candidates, phase 2 fetches their float32
+   *     vectors and reranks by exact metric. Default: 10.
+   *   - rerankFactor = 0: forces the exact full-scan path (skip binary).
+   * Ignored when the file has no binary column.
+   */
+  rerankFactor?: number
 
   // fetch options
   signal?: AbortSignal
@@ -57,5 +68,6 @@ export interface HypVectorMetadata {
   dimension: number // length of each vector
   metric: DistanceMetric // intended distance metric
   normalized: boolean // whether vectors were l2-normalized on write
+  hasBinary: boolean // whether a `vector_bin` sign-bit column is present
   count: number // number of vectors
 }

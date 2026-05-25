@@ -1,11 +1,12 @@
 import { parquetWrite, schemaFromColumnData } from 'hyparquet-writer'
 import {
+  defaultBinaryColumn,
   defaultIdColumn,
   defaultRowGroupSize,
   defaultVectorColumn,
   hypVectorVersion,
 } from './constants.js'
-import { l2Normalize, packFloat32 } from './utils.js'
+import { l2Normalize, packBinary, packFloat32 } from './utils.js'
 
 /**
  * @import { WriteVectorsOptions } from './types.js'
@@ -36,15 +37,20 @@ export async function writeVectors({
   metric = 'cosine',
   normalize = false,
   codec = 'UNCOMPRESSED',
+  binary = false,
 }) {
   if (!Number.isInteger(dimension) || dimension <= 0) {
     throw new Error(`invalid dimension: ${dimension}`)
   }
 
+  const binaryBytes = (dimension + 7) >> 3
+
   /** @type {string[]} */
   const ids = []
   /** @type {Uint8Array[]} */
   const packed = []
+  /** @type {Uint8Array[] | null} */
+  const packedBin = binary ? [] : null
 
   for await (const record of vectors) {
     const { id, vector } = record
@@ -54,6 +60,7 @@ export async function writeVectors({
     const v = normalize ? l2Normalize(vector) : vector
     ids.push(String(id))
     packed.push(packFloat32(v))
+    if (packedBin) packedBin.push(packBinary(v, dimension))
   }
 
   const kvMetadata = [
@@ -61,6 +68,7 @@ export async function writeVectors({
     { key: 'hypvector.dimension', value: String(dimension) },
     { key: 'hypvector.metric', value: metric },
     { key: 'hypvector.normalized', value: String(normalize) },
+    { key: 'hypvector.binary', value: String(binary) },
     { key: 'hypvector.count', value: String(ids.length) },
   ]
 
@@ -69,17 +77,27 @@ export async function writeVectors({
     { name: defaultIdColumn, data: ids },
     { name: defaultVectorColumn, data: packed },
   ]
-  const schema = schemaFromColumnData({
-    columnData: [{ ...columnData[0], type: 'STRING' }, columnData[1]],
-    schemaOverrides: {
-      [defaultVectorColumn]: {
-        name: defaultVectorColumn,
-        type: 'FIXED_LEN_BYTE_ARRAY',
-        type_length: dimension * 4,
-        repetition_type: 'REQUIRED',
-      },
+  /** @type {Record<string, import('hyparquet').SchemaElement>} */
+  const schemaOverrides = {
+    [defaultVectorColumn]: {
+      name: defaultVectorColumn,
+      type: 'FIXED_LEN_BYTE_ARRAY',
+      type_length: dimension * 4,
+      repetition_type: 'REQUIRED',
     },
-  })
+  }
+  if (packedBin) {
+    columnData.push({ name: defaultBinaryColumn, data: packedBin })
+    schemaOverrides[defaultBinaryColumn] = {
+      name: defaultBinaryColumn,
+      type: 'FIXED_LEN_BYTE_ARRAY',
+      type_length: binaryBytes,
+      repetition_type: 'REQUIRED',
+    }
+  }
+
+  const schemaInput = columnData.map(c => c.name === defaultIdColumn ? { ...c, type: /** @type {const} */ ('STRING') } : c)
+  const schema = schemaFromColumnData({ columnData: schemaInput, schemaOverrides })
 
   await parquetWrite({
     writer,

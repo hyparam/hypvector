@@ -65,6 +65,7 @@ console.log(`File: ${filename}`)
 console.log(`Vectors: ${meta.count.toLocaleString()} × ${meta.dimension}-dim`)
 console.log(`File size: ${stat.size.toLocaleString()} bytes (${(stat.size / rawSize * 100).toFixed(1)}% of raw float32)`)
 console.log(`Metric: ${meta.metric}${meta.normalized ? ' (normalized)' : ''}`)
+console.log(`Binary column: ${meta.hasBinary}`)
 
 // Sample some stored vectors to use as query vectors.
 // (For real data this is more representative than uniform-random queries.)
@@ -83,37 +84,93 @@ for await (const record of readVectors({ file: sourceFile, metadata })) {
   i += 1
 }
 
-// Instrument the source buffer to count bytes/fetches per query.
-const fresh = await asyncBufferFromFile(filename)
-let bytesRead = 0
-let fetches = 0
-const origSlice = fresh.slice.bind(fresh)
-fresh.slice = function (start, end) {
-  bytesRead += (end ?? fresh.byteLength) - start
-  fetches += 1
-  return origSlice(start, end)
+/**
+ * Wrap an AsyncBuffer to count bytes + fetches.
+ *
+ * @param {import('hyparquet').AsyncBuffer} buf
+ * @returns {import('hyparquet').AsyncBuffer & { bytes: number, fetches: number, reset: () => void }}
+ */
+function instrument(buf) {
+  /** @type {any} */
+  const wrapped = buf
+  wrapped.bytes = 0
+  wrapped.fetches = 0
+  const origSlice = buf.slice.bind(buf)
+  wrapped.slice = function (start, end) {
+    wrapped.bytes += (end ?? buf.byteLength) - start
+    wrapped.fetches += 1
+    return origSlice(start, end)
+  }
+  wrapped.reset = () => { wrapped.bytes = 0; wrapped.fetches = 0 }
+  return wrapped
 }
 
-console.log('\n=== Search (linear scan) ===')
-const times = []
-for (let q = 0; q < queries.length; q += 1) {
-  bytesRead = 0
-  fetches = 0
-  const start = performance.now()
-  const results = await searchVectors({
-    url: filename,
-    query: queries[q].vector,
-    topK: 10,
-    sourceFile: fresh,
-    sourceMetadata: metadata,
-  })
-  const ms = performance.now() - start
-  times.push(ms)
-  const top = results[0]
-  const note = String(top.id) === String(queries[q].id) ? ' (= query)' : ''
-  console.log(`Query ${q + 1} (id=${queries[q].id}): ${ms.toFixed(0)} ms, ${fetches} fetches, ${bytesRead.toLocaleString()} bytes, top id=${top.id} score=${top.score.toFixed(4)}${note}`)
+/**
+ * Run a configured search across all queries and return aggregated stats + per-query ids.
+ *
+ * @param {string} label
+ * @param {{ rerankFactor?: number }} opts
+ * @returns {Promise<{ label: string, avgMs: number, avgBytes: number, avgFetches: number, tops: string[][] }>}
+ */
+async function runSearchSuite(label, opts) {
+  const buf = instrument(await asyncBufferFromFile(filename))
+  const times = []
+  const bytesPer = []
+  const fetchesPer = []
+  const tops = []
+  for (const q of queries) {
+    buf.reset()
+    const start = performance.now()
+    const results = await searchVectors({
+      url: filename, query: q.vector, topK: 10, sourceFile: buf, sourceMetadata: metadata, ...opts,
+    })
+    times.push(performance.now() - start)
+    bytesPer.push(buf.bytes)
+    fetchesPer.push(buf.fetches)
+    tops.push(results.map(r => String(r.id)))
+  }
+  const avgMs = times.reduce((s, t) => s + t, 0) / times.length
+  const avgBytes = bytesPer.reduce((s, t) => s + t, 0) / bytesPer.length
+  const avgFetches = fetchesPer.reduce((s, t) => s + t, 0) / fetchesPer.length
+  return { label, avgMs, avgBytes, avgFetches, tops }
 }
 
-const avg = times.reduce((s, t) => s + t, 0) / times.length
-const throughput = meta.count / (avg / 1000)
-console.log(`\nAverage query: ${avg.toFixed(0)} ms (${throughput.toLocaleString(undefined, { maximumFractionDigits: 0 })} vectors/s)`)
+console.log('\n=== Search ===')
+const exact = await runSearchSuite('Exact full scan', { rerankFactor: 0 })
+const rerank = meta.hasBinary ? await runSearchSuite('Binary + rerank', { rerankFactor: 10 }) : null
+
+/**
+ * Recall@10 = |intersection| / |reference|, averaged across queries.
+ *
+ * @param {string[][]} reference
+ * @param {string[][]} candidate
+ * @returns {number}
+ */
+function recallAt10(reference, candidate) {
+  let sum = 0
+  for (let q = 0; q < reference.length; q += 1) {
+    const ref = new Set(reference[q])
+    let hits = 0
+    for (const id of candidate[q]) if (ref.has(id)) hits += 1
+    sum += hits / ref.size
+  }
+  return sum / reference.length
+}
+
+/**
+ * @param {{ label: string, avgMs: number, avgBytes: number, avgFetches: number }} r
+ * @returns {string}
+ */
+function fmt(r) {
+  const throughput = meta.count / (r.avgMs / 1000)
+  return `${r.label.padEnd(22)} ${r.avgMs.toFixed(1).padStart(7)} ms  ${r.avgFetches.toFixed(1).padStart(5)} fetches  ${(r.avgBytes / 1e6).toFixed(2).padStart(7)} MB read  (${throughput.toLocaleString(undefined, { maximumFractionDigits: 0 })} vec/s)`
+}
+
+console.log(fmt(exact))
+if (rerank) {
+  console.log(fmt(rerank))
+  const recall = recallAt10(exact.tops, rerank.tops)
+  console.log(`\nRecall@10 (rerank vs exact): ${(recall * 100).toFixed(1)}%`)
+  console.log(`Speedup:                     ${(exact.avgMs / rerank.avgMs).toFixed(2)}× faster`)
+  console.log(`Bytes read:                  ${(rerank.avgBytes / exact.avgBytes * 100).toFixed(1)}% of exact`)
+}
