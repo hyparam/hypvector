@@ -164,62 +164,96 @@ async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, rep
 
   if (candidateHeap.length === 0) return []
 
-  // Phase 2: read float32 vectors for candidates. When candidates cluster
-  // spatially (typical with sorted/clustered data), coalesce into a few
-  // contiguous range reads instead of one read per candidate.
+  // Phase 2: read ONLY the float32 vectors for candidates (no ids — those
+  // are fetched in phase 3 for just the top-K winners, saving the id column
+  // reads that dominate phase 2 over the network).
   const candidateRows = [...new Set(candidateHeap.map(c => c.rowIndex))].sort((a, b) => a - b)
   const wantedRows = new Set(candidateRows)
   const runs = coalesceRuns(candidateRows, 64)
-  const decoder = new TextDecoder()
 
-  /** @type {{ rowIndex: number, score: number, id: string }[]} */
+  /** @type {{ rowIndex: number, score: number }[]} */
   const scored = []
 
   await Promise.all(runs.map(async ({ rowStart, rowEnd }) => {
-    /** @type {Map<number, { id?: string, vector?: Float32Array }>} */
+    /** @type {Map<number, Float32Array>} */
     const local = new Map()
     await parquetRead({
       file,
       metadata,
-      columns: [defaultIdColumn, defaultVectorColumn],
+      columns: [defaultVectorColumn],
       rowStart,
       rowEnd,
       useOffsetIndex: true,
       onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
+        if (columnName !== defaultVectorColumn) return
         for (let i = 0; i < columnData.length; i += 1) {
           const rowIndex = chunkStart + i
           if (!wantedRows.has(rowIndex)) continue
-          let entry = local.get(rowIndex)
-          if (!entry) { entry = {}; local.set(rowIndex, entry) }
-          if (columnName === defaultIdColumn) {
-            const raw = /** @type {any} */ (columnData)[i]
-            entry.id = typeof raw === 'string' ? raw : decoder.decode(raw)
-          } else if (columnName === defaultVectorColumn) {
-            const bytes = /** @type {Uint8Array[]} */ (columnData)[i]
-            if (bytes.byteOffset % 4 === 0) {
-              entry.vector = new Float32Array(bytes.buffer, bytes.byteOffset, dim)
-            } else {
-              const copy = new Float32Array(dim)
-              new Uint8Array(copy.buffer).set(bytes)
-              entry.vector = copy
-            }
+          const bytes = /** @type {Uint8Array[]} */ (columnData)[i]
+          /** @type {Float32Array} */
+          let vector
+          if (bytes.byteOffset % 4 === 0) {
+            vector = new Float32Array(bytes.buffer, bytes.byteOffset, dim)
+          } else {
+            vector = new Float32Array(dim)
+            new Uint8Array(vector.buffer).set(bytes)
           }
+          local.set(rowIndex, vector)
         }
       },
     })
-    for (const [rowIndex, entry] of local) {
-      if (!entry.vector) continue
-      scored.push({
-        rowIndex,
-        id: entry.id ?? String(rowIndex),
-        score: computeScore(queryF32, entry.vector, scoringMetric),
-      })
+    for (const [rowIndex, vector] of local) {
+      scored.push({ rowIndex, score: computeScore(queryF32, vector, scoringMetric) })
     }
   }))
 
   const dir = reportedMetric === 'euclidean' ? 1 : -1
   scored.sort((a, b) => dir * (a.score - b.score))
-  return scored.slice(0, topK).map(({ id, score, rowIndex }) => ({ id, score, rowIndex }))
+  const winners = scored.slice(0, topK)
+
+  // Phase 3: fetch ids for just the top-K winners.
+  const ids = await fetchIds(file, metadata, winners.map(w => w.rowIndex))
+  return winners.map((w, i) => ({ id: ids[i], score: w.score, rowIndex: w.rowIndex }))
+}
+
+/**
+ * Read the id column for a set of row indices. Coalesces into runs so a
+ * few small parquetRead calls cover all winners. Returns ids in the same
+ * order as the input rowIndices.
+ *
+ * @param {AsyncBuffer} file
+ * @param {FileMetaData} metadata
+ * @param {number[]} rowIndices
+ * @returns {Promise<string[]>}
+ */
+async function fetchIds(file, metadata, rowIndices) {
+  if (rowIndices.length === 0) return []
+  const sorted = [...new Set(rowIndices)].sort((a, b) => a - b)
+  const wanted = new Set(sorted)
+  const runs = coalesceRuns(sorted, 64)
+  const decoder = new TextDecoder()
+  /** @type {Map<number, string>} */
+  const byRow = new Map()
+
+  await Promise.all(runs.map(({ rowStart, rowEnd }) => parquetRead({
+    file,
+    metadata,
+    columns: [defaultIdColumn],
+    rowStart,
+    rowEnd,
+    useOffsetIndex: true,
+    onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
+      if (columnName !== defaultIdColumn) return
+      for (let i = 0; i < columnData.length; i += 1) {
+        const rowIndex = chunkStart + i
+        if (!wanted.has(rowIndex)) continue
+        const raw = /** @type {any} */ (columnData)[i]
+        byRow.set(rowIndex, typeof raw === 'string' ? raw : decoder.decode(raw))
+      }
+    },
+  })))
+
+  return rowIndices.map(r => byRow.get(r) ?? String(r))
 }
 
 /**
