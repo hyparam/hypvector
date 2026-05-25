@@ -1,41 +1,78 @@
 # HypVector
 
+[![npm](https://img.shields.io/npm/v/hypvector)](https://www.npmjs.com/package/hypvector)
+[![minzipped](https://img.shields.io/bundlephobia/minzip/hypvector)](https://www.npmjs.com/package/hypvector)
 [![mit license](https://img.shields.io/badge/License-MIT-orange.svg)](https://opensource.org/licenses/MIT)
 
-Store embedding vectors compactly in Parquet and query them directly over HTTP range requests using [`hyparquet`](https://github.com/hyparam/hyparquet) and [`hyparquet-writer`](https://github.com/hyparam/hyparquet-writer).
+## What is hypvector?
 
-## Why?
+**HypVector** is a JavaScript library for storing and querying embedding vectors directly out of [Apache Parquet](https://parquet.apache.org) files. It builds on [`hyparquet`](https://github.com/hyparam/hyparquet) and [`hyparquet-writer`](https://github.com/hyparam/hyparquet-writer) so that a Parquet file on S3 (or local disk) acts as the vector database — any client can run similarity search over HTTP range requests, without a server in between.
 
-Most vector databases require a server. HypVector treats a Parquet file on S3 (or local disk) as the database, so any client can run similarity search without infrastructure. The file is self-describing — query parameters (dimension, metric, normalization, cluster centroids) are stored in Parquet key-value metadata.
+ - Works in browsers and node.js
+ - Self-describing files (dimension, metric, normalization, cluster centroids in Parquet KV metadata)
+ - Exact and approximate (binary + cluster + rerank) search out of the box
+ - Minimizes data fetching using HTTP range requests
+ - Includes TypeScript definitions
 
 At 156k 384-dim wiki embeddings (249 MB), a single top-10 query reads **~6 MB across ~160 ranged HTTP fetches** with ~91% recall against an exact full scan. Over a localhost HTTP server with 20 ms of injected per-request latency, the rerank path lands at **~140 ms/query** vs ~360 ms for an exact full scan.
 
-## How it works
+## Quick Start
 
-Three columns: `id` (STRING), `vector` (`FIXED_LEN_BYTE_ARRAY(4 × dim)`, raw float32 bytes, `UNCOMPRESSED`), and — when `binary: true` — `vector_bin` (`FIXED_LEN_BYTE_ARRAY(dim/8)`, 1 bit per dim).
+### Browser Example
 
-**Exact search path** (no binary column, or `rerankFactor: 0`): single pass over the float32 column via `parquetRead({ onChunk })`. Each row-group's decoded `Uint8Array[]` shares a backing buffer, so we view it as one aligned `Float32Array` and stride by `dim` — zero per-row allocations.
+In the browser, pass a URL string as `source` and HypVector wraps it as a cached async buffer for ranged HTTP reads. Embed the query with the **same model** used at write time:
 
-**Binary + cluster + rerank path** (default when `binary: true`):
+```javascript
+const { searchVectors } = await import('https://cdn.jsdelivr.net/npm/hypvector/src/index.js')
 
-1. **Build-time clustering** (when `clusters > 0`): k-means on the 1-bit codes using Hamming distance and bit-majority voting. Cluster ids are then renumbered via a greedy nearest-neighbor walk so that adjacent ids = similar centroids — this makes the top-N nearest clusters at query time tend to land in fewer contiguous row ranges. Rows are sorted by the new cluster id. Centroids and per-cluster row counts go into KV metadata.
-2. **Phase 1 — cluster pruning**: rank clusters by Hamming(query, centroid), pick the top `probe` fraction, and Hamming-scan only those clusters' row ranges. With 32 KB pages and `useOffsetIndex`, hyparquet fetches only the pages covering each cluster's rows.
-3. **Phase 2 — float32 rerank**: collect the top `topK × rerankFactor` candidate row indices, coalesce them into contiguous runs (merging gaps ≤ 64 rows), and issue one ranged `parquetRead` per run for the `vector` column only. Score under the exact metric.
-4. **Phase 3 — id lookup**: fetch the `id` column for *only* the top-K winners (the id column is variable-length and reading it for every candidate doubles phase-2 cost).
+const results = await searchVectors({
+  source: 'https://example.com/vectors.parquet',
+  query: queryVec, // Float32Array of length `dimension`
+  topK: 10,
+})
 
-A `cachedAsyncBuffer` deduplicates footer / offset-index byte ranges across all the parallel `parquetRead` calls.
-
-For pre-normalized vectors with `metric: 'cosine'`, the search normalizes the query once and scores via dot product to skip the per-candidate sqrt loop.
-
-## CLI usage
-
-```bash
-npx hypvector vectors.parquet
+for (const { id, score } of results) {
+  console.log(score, id)
+}
 ```
 
-Prints format version, vector count, dimension, metric, whether a binary column is present, cluster count, and storage overhead.
+### Node.js Example
 
-## Producing vectors
+To search a local Parquet file in a node.js environment, pass a file path:
+
+```javascript
+import { searchVectors } from 'hypvector'
+
+const results = await searchVectors({
+  source: 'vectors.parquet',
+  query: queryVec,
+  topK: 10,
+})
+```
+
+Note: hypvector is published as an ES module.
+
+## Writing Vectors
+
+Create a Parquet file from any sync or async iterable of `{ id, vector }`:
+
+```javascript
+import { fileWriter } from 'hyparquet-writer'
+import { writeVectors } from 'hypvector'
+
+await writeVectors({
+  writer: fileWriter('vectors.parquet'),
+  dimension: 384,
+  normalize: true,    // L2-normalize on write; lets search skip sqrt for cosine
+  binary: true,       // also write 1-bit-per-dim sign column for binary+rerank search
+  clusters: 128,      // k-means clusters for phase-1 pruning (implies binary: true)
+  vectors: myEmbedder(), // any sync or async iterable of { id, vector }
+})
+```
+
+When `binary: true`, the default `pageSize` drops to 32 KB so that offset-index reads during search fetch tight ranges. Override with explicit `pageSize` / `codec` / `rowGroupSize` if needed.
+
+### Producing vectors
 
 HypVector is BYO-embedding: you decide which model produces the vectors. It just stores `{ id, vector }` pairs and queries them. The only contracts are:
 
@@ -43,9 +80,9 @@ HypVector is BYO-embedding: you decide which model produces the vectors. It just
 2. **Same `dimension`** for every record (must match the `dimension` you pass to `writeVectors`).
 3. **`normalize: true`** is the right default for any model whose vectors aren't already unit-length and you intend to query with cosine — it saves the per-candidate sqrt at query time. If your model already normalizes (most modern sentence-transformer models do), still pass `normalize: true` so the flag is recorded in KV metadata.
 
-The natural shape is an async generator that yields embedded records as you batch them through your embedder. Two end-to-end sketches:
+The natural shape is an async generator that yields embedded records as you batch them through your embedder.
 
-### Local model (Transformers.js)
+#### Local model (Transformers.js)
 
 ```javascript
 import { pipeline } from '@huggingface/transformers'
@@ -74,7 +111,7 @@ await writeVectors({
 })
 ```
 
-### Remote API (OpenAI / Cohere / Voyage / etc.)
+#### Remote API (OpenAI / Cohere / Voyage / etc.)
 
 ```javascript
 async function* embed(docs, batchSize = 96) {
@@ -95,26 +132,9 @@ async function* embed(docs, batchSize = 96) {
 
 See `scripts/embed.js` for a working version that streams 156k wiki rows through MiniLM and writes the result.
 
-## Write vectors
+## Reading Vectors
 
-```javascript
-import { fileWriter } from 'hyparquet-writer'
-import { writeVectors } from 'hypvector'
-
-const writer = fileWriter('vectors.parquet')
-await writeVectors({
-  writer,
-  dimension: 384,
-  normalize: true,    // L2-normalize on write; lets search skip sqrt for cosine
-  binary: true,       // also write 1-bit-per-dim sign column for binary+rerank search
-  clusters: 128,      // k-means clusters for phase-1 pruning (implies binary: true)
-  vectors: myEmbedder(), // any sync or async iterable of { id, vector }
-})
-```
-
-`vectors` accepts any sync or async iterable of `{ id, vector }`. When `binary: true`, the default `pageSize` drops to 32 KB so that `useOffsetIndex` reads in phase 2 fetch tight ranges. Override with explicit `pageSize` / `codec` / `rowGroupSize` if needed.
-
-## Read vectors
+Stream every `{ id, vector }` record back out for inspection or migration:
 
 ```javascript
 import { asyncBufferFromFile } from 'hyparquet'
@@ -126,15 +146,11 @@ for await (const { id, vector } of readVectors({ file })) {
 }
 ```
 
-## Search
+## Advanced Usage
 
-Embed the query with the **same model** used at write time, then pass the resulting vector:
+### Search options
 
 ```javascript
-import { searchVectors } from 'hypvector'
-
-const [{ data: queryVec }] = await extract(['how do neural networks learn?'], { pooling: 'mean', normalize: true })
-
 const results = await searchVectors({
   source: 'https://example.com/vectors.parquet', // URL, local file path, or an open AsyncBuffer
   query: queryVec,    // Float32Array of length `dimension`
@@ -142,17 +158,30 @@ const results = await searchVectors({
   rerankFactor: 10,   // candidate pool = topK * rerankFactor (default 10). Set to 0 to force exact full scan.
   probe: 0.25,        // fraction of clusters to scan in phase 1 (default 0.25). Set to 1 to scan all clusters; pass an integer > 1 for an absolute count.
 })
-
-for (const { id, score } of results) {
-  console.log(score, id)
-}
 ```
 
-- `metric: 'cosine' | 'dot' | 'euclidean'` overrides the metric stored in the file.
-- `source` accepts a URL string, a local file path, or an already-opened `AsyncBuffer`. When a string is passed, the default factory wraps the buffer in `cachedAsyncBuffer` so repeated reads of the footer / offset indexes are served from memory.
-- For repeated queries against the same file, open the `AsyncBuffer` and parse `metadata` once, then pass both: `searchVectors({ source: file, metadata, query, ... })`. This skips the per-query footer fetch and metadata parse.
+ - `metric: 'cosine' | 'dot' | 'euclidean'` overrides the metric stored in the file.
+ - `source` accepts a URL string, a local file path, or an already-opened `AsyncBuffer`. When a string is passed, the default factory wraps the buffer in `cachedAsyncBuffer` so repeated reads of the footer / offset indexes are served from memory.
+ - For repeated queries against the same file, open the `AsyncBuffer` and parse `metadata` once, then pass both: `searchVectors({ source: file, metadata, query, ... })`. This skips the per-query footer fetch and metadata parse.
 
-## File layout
+### How it works
+
+Three columns: `id` (STRING), `vector` (`FIXED_LEN_BYTE_ARRAY(4 × dim)`, raw float32 bytes, `UNCOMPRESSED`), and — when `binary: true` — `vector_bin` (`FIXED_LEN_BYTE_ARRAY(dim/8)`, 1 bit per dim).
+
+**Exact search path** (no binary column, or `rerankFactor: 0`): single pass over the float32 column via `parquetRead({ onChunk })`. Each row-group's decoded `Uint8Array[]` shares a backing buffer, so we view it as one aligned `Float32Array` and stride by `dim` — zero per-row allocations.
+
+**Binary + cluster + rerank path** (default when `binary: true`):
+
+1. **Build-time clustering** (when `clusters > 0`): k-means on the 1-bit codes using Hamming distance and bit-majority voting. Cluster ids are then renumbered via a greedy nearest-neighbor walk so that adjacent ids = similar centroids — this makes the top-N nearest clusters at query time tend to land in fewer contiguous row ranges. Rows are sorted by the new cluster id. Centroids and per-cluster row counts go into KV metadata.
+2. **Phase 1 — cluster pruning**: rank clusters by Hamming(query, centroid), pick the top `probe` fraction, and Hamming-scan only those clusters' row ranges. With 32 KB pages and `useOffsetIndex`, hyparquet fetches only the pages covering each cluster's rows.
+3. **Phase 2 — float32 rerank**: collect the top `topK × rerankFactor` candidate row indices, coalesce them into contiguous runs (merging gaps ≤ 64 rows), and issue one ranged `parquetRead` per run for the `vector` column only. Score under the exact metric.
+4. **Phase 3 — id lookup**: fetch the `id` column for *only* the top-K winners (the id column is variable-length and reading it for every candidate doubles phase-2 cost).
+
+A `cachedAsyncBuffer` deduplicates footer / offset-index byte ranges across all the parallel `parquetRead` calls.
+
+For pre-normalized vectors with `metric: 'cosine'`, the search normalizes the query once and scores via dot product to skip the per-candidate sqrt loop.
+
+### File layout
 
 | Column | Type | Bytes per row | When written |
 |---|---|---|---|
@@ -174,7 +203,15 @@ Key-value metadata:
 | `hypvector.centroids` | base64-encoded centroid binary codes (`clusters × dim/8` bytes); present when `clusters > 0` |
 | `hypvector.clusterCounts` | base64-encoded `Uint32Array` of per-cluster row counts; present when `clusters > 0` |
 
-## Scale guidance
+### CLI
+
+```bash
+npx hypvector vectors.parquet
+```
+
+Prints format version, vector count, dimension, metric, whether a binary column is present, cluster count, and storage overhead.
+
+### Scale guidance
 
 The default `rerankFactor` of 10 is tuned for the hundreds-of-thousands range. As `N` grows, more binary candidates tie at the same Hamming distance and a wider phase-1 pool is needed to keep recall up. On a 1M synthetic dataset (256 true clusters, Gaussian noise):
 
@@ -187,7 +224,9 @@ The default `rerankFactor` of 10 is tuned for the hundreds-of-thousands range. A
 
 Rough rule: `rerankFactor ≈ max(10, N / 3000)`. At 1M that's ~333, giving ~98% recall at ~440 ms — still about an order of magnitude faster than the 950 ms exact scan.
 
-## Performance (156k 384-dim wiki, local file)
+## Performance
+
+Measured on the 156k 384-dim wiki dataset, local file.
 
 From `scripts/ablation.js` (write-side optimizations):
 
@@ -223,3 +262,29 @@ Trade query speed for recall via the `probe` knob (fraction of clusters scanned)
 | 0.25 (default) | 16 | 79 | 5.2 | 91% |
 | 0.50 | 21 | 94 | 6.5 | 94% |
 | 1.00 (all clusters) | 29 | 70 | 8.3 | 94% |
+
+## Comparison
+
+hypvector isn't a hosted service. The closest peers are:
+
+| Engine | Server? | Cold p50 | Warm p50 | Fixed $/mo |
+|---|---|---:|---:|---:|
+| **hypvector** | none — file on S3 | ~140 ms (HTTP) | same — no cache | $0 |
+| **LanceDB** (S3 mode) | none — embedded | bandwidth-bound | sub-50 ms (local) | $0 |
+| **turbopuffer** | hosted | ~440 ms p90 | ~8 ms | $64 min |
+| **Pinecone Serverless** | hosted | 200 ms – 2 s | 50–100 ms | $0 + per-RU |
+| **Cloudflare Vectorize** | hosted (edge) | needs pre-warm | edge-fast | $0 + per-op |
+
+Use hypvector for static datasets, browser-side search, or low-QPS where a hosted service's minimum spend dwarfs the actual cost. Reach for a hosted service when you need sub-10 ms warm latency at sustained QPS, frequent upserts, or filter-aware recall at scale.
+
+## References
+
+ - [hyparquet](https://github.com/hyparam/hyparquet) — Parquet reading
+ - [hyparquet-writer](https://github.com/hyparam/hyparquet-writer) — Parquet writing
+ - [hyparquet-compressors](https://github.com/hyparam/hyparquet-compressors) — Compression codecs
+ - [Apache Parquet](https://parquet.apache.org) — Columnar storage format
+
+## Contributions
+
+Contributions are welcome!
+If you have suggestions, bug reports, or feature requests, please open an issue or submit a pull request.
