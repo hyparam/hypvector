@@ -19,6 +19,9 @@ export interface WriteVectorsOptions {
   codec?: CompressionCodec // parquet codec (default: 'UNCOMPRESSED'; SNAPPY/ZSTD rarely shrink float embeddings and cost ~2-3x query latency)
   binary?: boolean // also write a 1-bit-per-dim sign-bit column for binary+rerank search (default: false; adds ~1.5% file size at 384-dim)
   pageSize?: number // target page size in bytes (default: 1 MB). Smaller pages let `useOffsetIndex` fetch tighter ranges in rerank phase 2 at the cost of more page-header overhead.
+  clusters?: number // run binary k-means with this many clusters, sort rows by cluster id, and store centroids in KV metadata. Enables phase 1 row-group skipping at query time. Implies binary=true. Recommended: 64-256 for 100k vectors.
+  clusterIterations?: number // k-means iterations (default: 6)
+  clusterSeed?: number // RNG seed for deterministic clustering (default: 1)
 }
 
 export interface ReadVectorsOptions {
@@ -41,9 +44,21 @@ export interface SearchVectorsOptions {
    *     (topK * rerankFactor) candidates, phase 2 fetches their float32
    *     vectors and reranks by exact metric. Default: 10.
    *   - rerankFactor = 0: forces the exact full-scan path (skip binary).
+   * Tune up as N grows: binary Hamming saturates, so bigger datasets
+   * need a wider candidate pool. ~N/3000 is a good starting point.
    * Ignored when the file has no binary column.
    */
   rerankFactor?: number
+
+  /**
+   * When the file is clustered, this controls how many clusters phase 1
+   * actually scans. Can be expressed as:
+   *   - an integer >= 1 (number of clusters)
+   *   - a float in (0, 1] (fraction of total clusters)
+   * Lower values are faster but reduce recall. Default: 0.1 (scan 10% of clusters).
+   * Ignored when the file has no centroids.
+   */
+  probe?: number
 
   // fetch options
   signal?: AbortSignal
@@ -71,4 +86,7 @@ export interface HypVectorMetadata {
   normalized: boolean // whether vectors were l2-normalized on write
   hasBinary: boolean // whether a `vector_bin` sign-bit column is present
   count: number // number of vectors
+  clusters: number // number of k-means clusters used to sort rows (0 = not clustered)
+  centroids?: Uint8Array[] // binary centroids (length == clusters), each binaryBytes long
+  clusterCounts?: Uint32Array // number of rows in each cluster; cluster k spans [cumsum[k], cumsum[k+1])
 }

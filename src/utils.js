@@ -107,7 +107,7 @@ export function packFloat32(v) {
  * @returns {Uint8Array}
  */
 export function packBinary(v, dim = v.length) {
-  const bytes = new Uint8Array((dim + 7) >> 3)
+  const bytes = new Uint8Array(dim + 7 >> 3)
   for (let i = 0; i < dim; i += 1) {
     if (v[i] >= 0) bytes[i >> 3] |= 1 << (i & 7)
   }
@@ -184,8 +184,41 @@ export function parseKvMetadata(metadata) {
   const normalized = kv['hypvector.normalized'] === 'true'
   const hasBinary = kv['hypvector.binary'] === 'true'
   const count = Number(metadata.num_rows)
+  const clusters = parseInt(kv['hypvector.clusters'] ?? '0', 10)
   if (!dimension) {
     throw new Error('Not a hypvector parquet file: missing hypvector.dimension metadata')
   }
-  return { version, dimension, metric, normalized, hasBinary, count }
+  /** @type {HypVectorMetadata} */
+  const out = { version, dimension, metric, normalized, hasBinary, count, clusters }
+  if (clusters > 0 && kv['hypvector.centroids']) {
+    const binaryBytes = dimension + 7 >> 3
+    const bytes = decodeBase64(kv['hypvector.centroids'])
+    if (bytes.byteLength !== clusters * binaryBytes) {
+      throw new Error(`centroids length mismatch: ${bytes.byteLength} vs ${clusters * binaryBytes}`)
+    }
+    out.centroids = []
+    for (let c = 0; c < clusters; c += 1) {
+      out.centroids.push(bytes.slice(c * binaryBytes, (c + 1) * binaryBytes))
+    }
+  }
+  if (clusters > 0 && kv['hypvector.clusterCounts']) {
+    const bytes = decodeBase64(kv['hypvector.clusterCounts'])
+    // The encoded buffer may not be 4-byte-aligned; copy to ensure alignment.
+    const aligned = new Uint8Array(bytes.byteLength)
+    aligned.set(bytes)
+    out.clusterCounts = new Uint32Array(aligned.buffer, 0, clusters)
+  }
+  return out
+}
+
+/**
+ * @param {string} s
+ * @returns {Uint8Array}
+ */
+function decodeBase64(s) {
+  if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(s, 'base64'))
+  const bin = atob(s)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i)
+  return out
 }

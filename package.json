@@ -46,7 +46,7 @@
   "dependencies": {
     "hyparquet": "1.26.0",
     "hyparquet-compressors": "1.1.1",
-    "hyparquet-writer": "0.15.1"
+    "hyparquet-writer": "0.15.3"
   },
   "devDependencies": {
     "@types/node": "25.9.1",
