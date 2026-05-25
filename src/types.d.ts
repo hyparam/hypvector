@@ -34,8 +34,23 @@ export interface ReadVectorsOptions {
 
 export interface SearchVectorsOptions {
   query: Float32Array | number[] // the query vector
-  source: string | AsyncBuffer // URL, file path, or an already-opened AsyncBuffer
-  metadata?: FileMetaData // optional pre-parsed parquet metadata; skips the footer fetch on every call. Reuse across queries for best throughput.
+
+  /**
+   * One source or an array of sources. Each source is a URL, file path, or
+   * an already-opened AsyncBuffer. With an array, each file is searched in
+   * parallel and the global top-K is returned with `result.sourceIndex` set.
+   * All sources must share the same dimension and metric.
+   */
+  source: string | AsyncBuffer | Array<string | AsyncBuffer>
+
+  /**
+   * Pre-parsed parquet metadata; skips the footer fetch on every call.
+   * Reuse across queries for best throughput. When `source` is an array,
+   * pass a same-length array of (FileMetaData | undefined) — undefined
+   * slots fall back to fetching the footer for that source.
+   */
+  metadata?: FileMetaData | Array<FileMetaData | undefined>
+
   topK?: number // number of nearest neighbors to return (default: 10)
   metric?: DistanceMetric // override the stored metric
 
@@ -43,9 +58,10 @@ export interface SearchVectorsOptions {
    * Pre-fetched binary column from `prefetchBinary`. When provided, phase 1
    * Hamming scan runs entirely from memory and the binary parquet fetches
    * are skipped. The buffer must be `count × dim/8` bytes in the same row
-   * order as the file. Reuse across queries.
+   * order as the file. Reuse across queries. When `source` is an array,
+   * pass a same-length array of (Uint8Array | undefined).
    */
-  binary?: Uint8Array
+  binary?: Uint8Array | Array<Uint8Array | undefined>
 
   /**
    * When the file has a binary column, controls two-phase search:
@@ -87,6 +103,7 @@ export interface SearchResult {
   id: string | number
   score: number // similarity score (higher = better for cosine/dot, lower = better for euclidean)
   rowIndex: number // original row index in the source parquet
+  sourceIndex?: number // index into the `source` array; set only when multi-source search was used
   metadata?: Record<string, any>
 }
 

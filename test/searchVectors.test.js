@@ -112,6 +112,61 @@ describe('searchVectors', () => {
     }
   })
 
+  it('accepts a single-element source array as equivalent to a bare source', async () => {
+    const dimension = 32
+    const vectors = makeVectors(80, dimension, 5)
+    const writer = fileWriter(TEST_FILE)
+    await writeVectors({ writer, vectors, dimension })
+
+    const query = vectors[12].vector
+    const bare = await searchVectors({ source: TEST_FILE, query, topK: 3 })
+    const wrapped = await searchVectors({ source: [TEST_FILE], query, topK: 3 })
+    expect(wrapped.map(r => r.id)).toEqual(bare.map(r => r.id))
+    // sourceIndex is only attached when truly multi-source (length > 1) to keep
+    // results identical between the bare and array-of-one forms.
+    expect(bare[0].sourceIndex).toBeUndefined()
+    expect(wrapped[0].sourceIndex).toBeUndefined()
+  })
+
+  it('merges results across multiple sources matching a single-file search', async () => {
+    const dimension = 32
+    const fileA = 'test/files/search-a.parquet'
+    const fileB = 'test/files/search-b.parquet'
+    const all = makeVectors(100, dimension, 9)
+    const halfA = all.slice(0, 50)
+    const halfB = all.slice(50)
+
+    await writeVectors({ writer: fileWriter(TEST_FILE), vectors: all, dimension, normalize: true })
+    await writeVectors({ writer: fileWriter(fileA), vectors: halfA, dimension, normalize: true })
+    await writeVectors({ writer: fileWriter(fileB), vectors: halfB, dimension, normalize: true })
+
+    try {
+      const query = all[37].vector
+      const combined = await searchVectors({ source: TEST_FILE, query, topK: 5 })
+      const split = await searchVectors({ source: [fileA, fileB], query, topK: 5 })
+
+      // Same IDs in the same order — vectors[37] lands in fileA so the top hit must be from source 0.
+      expect(split.map(r => r.id)).toEqual(combined.map(r => r.id))
+      expect(split[0].sourceIndex).toBe(0)
+      for (let i = 0; i < combined.length; i += 1) {
+        expect(split[i].score).toBeCloseTo(combined[i].score, 5)
+      }
+    } finally {
+      if (existsSync(fileA)) unlinkSync(fileA)
+      if (existsSync(fileB)) unlinkSync(fileB)
+    }
+  })
+
+  it('rejects metadata/binary arrays whose length does not match the source array', async () => {
+    const dimension = 16
+    const vectors = makeVectors(20, dimension, 1)
+    await writeVectors({ writer: fileWriter(TEST_FILE), vectors, dimension })
+
+    await expect(searchVectors({
+      source: [TEST_FILE, TEST_FILE], query: vectors[0].vector, topK: 1, metadata: [undefined],
+    })).rejects.toThrow(/metadata.*length/)
+  })
+
   it('produces the same top-1 with and without rerank', async () => {
     const dimension = 64
     const vectors = makeVectors(200, dimension, 23)
