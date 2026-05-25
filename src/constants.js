@@ -12,3 +12,8 @@ export const defaultBinaryColumn = 'vector_bin'
 
 // Default name of the id column
 export const defaultIdColumn = 'id'
+
+// Default parquet page size (in bytes) when a binary column is written.
+// Smaller pages let useOffsetIndex fetch only the pages containing the
+// per-candidate rows in the rerank phase 2 scan.
+export const defaultBinaryPageSize = 64 * 1024

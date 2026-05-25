@@ -1,6 +1,7 @@
 import { parquetWrite, schemaFromColumnData } from 'hyparquet-writer'
 import {
   defaultBinaryColumn,
+  defaultBinaryPageSize,
   defaultIdColumn,
   defaultRowGroupSize,
   defaultVectorColumn,
@@ -38,10 +39,15 @@ export async function writeVectors({
   normalize = false,
   codec = 'UNCOMPRESSED',
   binary = false,
+  pageSize,
 }) {
   if (!Number.isInteger(dimension) || dimension <= 0) {
     throw new Error(`invalid dimension: ${dimension}`)
   }
+
+  // When writing a binary rerank column, default to small pages so that
+  // useOffsetIndex in phase 2 fetches only ~one page per candidate row.
+  const effectivePageSize = pageSize ?? (binary ? defaultBinaryPageSize : undefined)
 
   const binaryBytes = (dimension + 7) >> 3
 
@@ -106,5 +112,6 @@ export async function writeVectors({
     kvMetadata,
     columnData,
     codec,
+    ...(effectivePageSize !== undefined ? { pageSize: effectivePageSize } : {}),
   })
 }
