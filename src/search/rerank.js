@@ -48,6 +48,10 @@ export async function searchRerank({ file, metadata, meta, queryF32, scoringMetr
     : [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
 
   // Phase 1: Hamming scan over selected ranges of the binary column.
+  // The binary column is small (dim/8 bytes/row), so per-page seeking via
+  // useOffsetIndex costs an extra RT without saving meaningful bytes — read
+  // whole column chunks instead. (Phase 2's float32 column is ~32x larger
+  // per row, so it keeps useOffsetIndex below.)
   await Promise.all(scanRanges.map(({ rowStart, rowEnd }) => parquetRead({
     file,
     metadata,
@@ -55,7 +59,6 @@ export async function searchRerank({ file, metadata, meta, queryF32, scoringMetr
     columns: [defaultBinaryColumn],
     rowStart,
     rowEnd,
-    useOffsetIndex: true,
     onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
       if (columnName !== defaultBinaryColumn) return
       hammingScoreChunk(columnData, chunkStart, binaryBytes, queryBinU32, candidateHeap, candidatesK)
