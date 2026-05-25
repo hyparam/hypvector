@@ -40,6 +40,14 @@ export interface SearchVectorsOptions {
   metric?: DistanceMetric // override the stored metric
 
   /**
+   * Pre-fetched binary column from `prefetchBinary`. When provided, phase 1
+   * Hamming scan runs entirely from memory and the binary parquet fetches
+   * are skipped. The buffer must be `count × dim/8` bytes in the same row
+   * order as the file. Reuse across queries.
+   */
+  binary?: Uint8Array
+
+  /**
    * When the file has a binary column, controls two-phase search:
    *   - rerankFactor > 0: phase 1 scans 1-bit codes (Hamming), keeps top
    *     (topK * rerankFactor) candidates, phase 2 fetches their float32
@@ -62,6 +70,14 @@ export interface SearchVectorsOptions {
   probe?: number
 
   // fetch options
+  signal?: AbortSignal
+  asyncBufferFactory?: (options: { source: string, signal?: AbortSignal }) => Promise<AsyncBuffer> // only consulted when `source` is a string
+  compressors?: Compressors
+}
+
+export interface PrefetchBinaryOptions {
+  source: string | AsyncBuffer // URL, file path, or open AsyncBuffer
+  metadata?: FileMetaData // pre-parsed parquet metadata; skips a footer fetch
   signal?: AbortSignal
   asyncBufferFactory?: (options: { source: string, signal?: AbortSignal }) => Promise<AsyncBuffer> // only consulted when `source` is a string
   compressors?: Compressors

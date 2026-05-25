@@ -8,7 +8,17 @@
  *
  * Defaults: https://s3.hyperparam.app/hypvector/wiki_en.vectors.parquet, 10 queries
  */
+// Force IPv4: this network's path to CloudFront's IPv6 announces but drops packets.
+import dns from 'node:dns'
+const origLookup = dns.lookup
+// @ts-expect-error overload signature
+dns.lookup = (hostname, opts, cb) => {
+  if (typeof opts === 'function') { cb = opts; opts = {} }
+  return origLookup.call(dns, hostname, { ...(opts ?? {}), family: 4 }, cb)
+}
+
 import { asyncBufferFromFile, asyncBufferFromUrl, cachedAsyncBuffer, parquetMetadataAsync } from 'hyparquet'
+import { prefetchBinary } from '../src/prefetch.js'
 import { readVectors } from '../src/readVectors.js'
 import { searchVectors } from '../src/searchVectors.js'
 import { parseKvMetadata } from '../src/utils.js'
@@ -85,3 +95,14 @@ async function suite(label, opts) {
 console.log()
 await suite('Exact full scan', { rerankFactor: 0 })
 await suite('Binary + rerank', { rerankFactor: 10 })
+
+// Prefetch binary once over the real URL, then run the rerank suite reusing
+// it. Simulates a long-lived client (browser session) where the binary
+// column is loaded at app start.
+const prefetchStart = performance.now()
+const prefetchRaw = await asyncBufferFromUrl({ url: URL })
+const prefetchCached = cachedAsyncBuffer(prefetchRaw)
+const binary = await prefetchBinary({ source: prefetchCached })
+const prefetchMs = performance.now() - prefetchStart
+console.log(`\nprefetched binary in ${prefetchMs.toFixed(0)} ms (${(binary.byteLength / 1e6).toFixed(2)} MB)`)
+await suite('+ prefetched binary', { rerankFactor: 10, binary })

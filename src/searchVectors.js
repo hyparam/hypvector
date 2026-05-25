@@ -31,6 +31,7 @@ export async function searchVectors({
   metric,
   rerankFactor = 10,
   probe,
+  binary,
   signal,
   asyncBufferFactory,
   compressors,
@@ -59,7 +60,7 @@ export async function searchVectors({
 
   if (meta.hasBinary && rerankFactor > 0) {
     return searchRerank({
-      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe, compressors,
+      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe, binary, compressors,
     })
   }
   return searchExact({

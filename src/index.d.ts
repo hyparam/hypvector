@@ -1,4 +1,5 @@
 import type {
+  PrefetchBinaryOptions,
   ReadVectorsOptions,
   SearchResult,
   SearchVectorsOptions,
@@ -9,6 +10,7 @@ import type {
 export type {
   DistanceMetric,
   HypVectorMetadata,
+  PrefetchBinaryOptions,
   ReadVectorsOptions,
   SearchResult,
   SearchVectorsOptions,
@@ -37,6 +39,14 @@ export function readVectors(options: ReadVectorsOptions): AsyncGenerator<VectorR
  * an exact full-scan when neither is present (or when `rerankFactor: 0`).
  */
 export function searchVectors(options: SearchVectorsOptions): Promise<SearchResult[]>
+
+/**
+ * Eagerly fetch the entire 1-bit-per-dim binary column into memory. Pass
+ * the returned buffer as `binary` to `searchVectors` and phase 1 Hamming
+ * scoring runs from RAM — every subsequent query skips its binary fetches.
+ * Cost: ~count × dim/8 bytes once.
+ */
+export function prefetchBinary(options: PrefetchBinaryOptions): Promise<Uint8Array>
 
 /**
  * Cosine similarity between two vectors (higher = more similar).

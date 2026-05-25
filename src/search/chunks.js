@@ -79,6 +79,57 @@ export function hammingScoreChunk(columnData, rowStart, bytesPerRow, queryU32, h
 }
 
 /**
+ * Score a contiguous row range of an in-memory binary buffer. Used after
+ * prefetchBinary: phase 1 reads from RAM instead of fetching parquet pages.
+ * The buffer is laid out row-major: row i occupies [i * bytesPerRow, (i+1) * bytesPerRow).
+ * Allocate the buffer 4-byte aligned (true for any Uint8Array backed by a
+ * fresh ArrayBuffer or Uint32Array.buffer) so the U32 view path is hot.
+ *
+ * @param {Uint8Array} buffer
+ * @param {number} rowStart inclusive
+ * @param {number} rowEnd exclusive
+ * @param {number} bytesPerRow
+ * @param {Uint32Array} queryU32
+ * @param {{ rowIndex: number, hamming: number }[]} heap
+ * @param {number} candidatesK
+ */
+export function hammingScoreFlatRange(buffer, rowStart, rowEnd, bytesPerRow, queryU32, heap, candidatesK) {
+  if (rowEnd <= rowStart) return
+  const wordsPerRow = bytesPerRow >> 2
+  const startByte = rowStart * bytesPerRow
+  const byteLen = (rowEnd - rowStart) * bytesPerRow
+  if ((buffer.byteOffset + startByte) % 4 === 0) {
+    const flat = new Uint32Array(buffer.buffer, buffer.byteOffset + startByte, byteLen >> 2)
+    for (let i = 0; i < rowEnd - rowStart; i += 1) {
+      let d = 0
+      const base = i * wordsPerRow
+      for (let j = 0; j < wordsPerRow; j += 1) {
+        let v = flat[base + j] ^ queryU32[j]
+        v = v - (v >>> 1 & 0x55555555)
+        v = (v & 0x33333333) + (v >>> 2 & 0x33333333)
+        d += (v + (v >>> 4) & 0x0f0f0f0f) * 0x01010101 >>> 24
+      }
+      pushHammingHeap(heap, { rowIndex: rowStart + i, hamming: d }, candidatesK)
+    }
+    return
+  }
+  // Misaligned fallback (rare; bytesPerRow is typically dim/8 with dim ≥ 32).
+  const scratchU32 = new Uint32Array(wordsPerRow)
+  const scratchBytes = new Uint8Array(scratchU32.buffer)
+  for (let i = 0; i < rowEnd - rowStart; i += 1) {
+    scratchBytes.set(buffer.subarray(startByte + i * bytesPerRow, startByte + (i + 1) * bytesPerRow))
+    let d = 0
+    for (let j = 0; j < wordsPerRow; j += 1) {
+      let v = scratchU32[j] ^ queryU32[j]
+      v = v - (v >>> 1 & 0x55555555)
+      v = (v & 0x33333333) + (v >>> 2 & 0x33333333)
+      d += (v + (v >>> 4) & 0x0f0f0f0f) * 0x01010101 >>> 24
+    }
+    pushHammingHeap(heap, { rowIndex: rowStart + i, hamming: d }, candidatesK)
+  }
+}
+
+/**
  * Return a Uint32Array view of a Uint8Array. Copies if the source byteOffset
  * isn't 4-byte aligned (Uint32Array requires alignment).
  *

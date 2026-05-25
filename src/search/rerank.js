@@ -1,7 +1,7 @@
 import { parquetRead } from 'hyparquet'
 import { defaultBinaryColumn, defaultIdColumn, defaultVectorColumn } from '../constants.js'
 import { packBinary } from '../utils.js'
-import { bytesToAlignedU32, hammingScoreChunk } from './chunks.js'
+import { bytesToAlignedU32, hammingScoreChunk, hammingScoreFlatRange } from './chunks.js'
 import { computeScore } from './heap.js'
 import { coalesceRuns, selectClusterRowRanges } from './ranges.js'
 
@@ -27,10 +27,11 @@ import { coalesceRuns, selectClusterRowRanges } from './ranges.js'
  * @param {number} options.topK
  * @param {number} options.rerankFactor
  * @param {number | undefined} options.probe
+ * @param {Uint8Array} [options.binary] in-memory binary column from prefetchBinary; when present, phase 1 runs from RAM
  * @param {Compressors} [options.compressors]
  * @returns {Promise<SearchResult[]>}
  */
-export async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK, rerankFactor, probe, compressors }) {
+export async function searchRerank({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK, rerankFactor, probe, binary, compressors }) {
   const dim = meta.dimension
   const binaryBytes = dim + 7 >> 3
   const candidatesK = Math.max(topK * rerankFactor, topK)
@@ -48,22 +49,30 @@ export async function searchRerank({ file, metadata, meta, queryF32, scoringMetr
     : [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
 
   // Phase 1: Hamming scan over selected ranges of the binary column.
-  // The binary column is small (dim/8 bytes/row), so per-page seeking via
-  // useOffsetIndex costs an extra RT without saving meaningful bytes — read
-  // whole column chunks instead. (Phase 2's float32 column is ~32x larger
-  // per row, so it keeps useOffsetIndex below.)
-  await Promise.all(scanRanges.map(({ rowStart, rowEnd }) => parquetRead({
-    file,
-    metadata,
-    compressors,
-    columns: [defaultBinaryColumn],
-    rowStart,
-    rowEnd,
-    onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
-      if (columnName !== defaultBinaryColumn) return
-      hammingScoreChunk(columnData, chunkStart, binaryBytes, queryBinU32, candidateHeap, candidatesK)
-    },
-  })))
+  // With a prefetched in-memory buffer, score the row ranges directly from
+  // RAM. Otherwise, parquetRead each range — the binary column is small
+  // (dim/8 bytes/row), so per-page seeking via useOffsetIndex costs an
+  // extra RT without saving meaningful bytes; read whole column chunks
+  // instead. (Phase 2's float32 column is ~32x larger per row, so it
+  // keeps useOffsetIndex below.)
+  if (binary) {
+    for (const { rowStart, rowEnd } of scanRanges) {
+      hammingScoreFlatRange(binary, rowStart, rowEnd, binaryBytes, queryBinU32, candidateHeap, candidatesK)
+    }
+  } else {
+    await Promise.all(scanRanges.map(({ rowStart, rowEnd }) => parquetRead({
+      file,
+      metadata,
+      compressors,
+      columns: [defaultBinaryColumn],
+      rowStart,
+      rowEnd,
+      onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
+        if (columnName !== defaultBinaryColumn) return
+        hammingScoreChunk(columnData, chunkStart, binaryBytes, queryBinU32, candidateHeap, candidatesK)
+      },
+    })))
+  }
 
   if (candidateHeap.length === 0) return []
 
