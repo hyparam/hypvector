@@ -115,41 +115,6 @@ export function packBinary(v, dim = v.length) {
 }
 
 /**
- * Population count of a 32-bit integer (number of set bits).
- * Uses the standard SWAR bit-twiddling trick.
- *
- * @param {number} v
- * @returns {number}
- */
-export function popcount32(v) {
-  v = v - (v >>> 1 & 0x55555555)
-  v = (v & 0x33333333) + (v >>> 2 & 0x33333333)
-  return (v + (v >>> 4) & 0x0f0f0f0f) * 0x01010101 >>> 24
-}
-
-/**
- * Hamming distance between two equal-length Uint32 arrays
- * (interpreted as packed bit strings).
- *
- * @param {Uint32Array} a
- * @param {Uint32Array} b
- * @returns {number}
- */
-export function hammingDistanceU32(a, b) {
-  if (a.length !== b.length) {
-    throw new Error(`u32 length mismatch: ${a.length} vs ${b.length}`)
-  }
-  let d = 0
-  for (let i = 0; i < a.length; i += 1) {
-    let v = a[i] ^ b[i]
-    v = v - (v >>> 1 & 0x55555555)
-    v = (v & 0x33333333) + (v >>> 2 & 0x33333333)
-    d += (v + (v >>> 4) & 0x0f0f0f0f) * 0x01010101 >>> 24
-  }
-  return d
-}
-
-/**
  * Unpack a Uint8Array of raw little-endian float32 bytes into a Float32Array.
  * Always returns a fresh aligned copy, since the source buffer may be
  * misaligned for a Float32Array view.

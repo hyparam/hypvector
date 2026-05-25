@@ -16,7 +16,7 @@ export interface WriteVectorsOptions {
   rowGroupSize?: number // rows per row group (default: 10000)
   metric?: DistanceMetric // hint stored in kv metadata (default: 'cosine')
   normalize?: boolean // l2-normalize vectors on write (default: false)
-  codec?: CompressionCodec // parquet codec (default: 'UNCOMPRESSED'; SNAPPY/ZSTD rarely shrink float embeddings and cost ~2-3x query latency)
+  codec?: CompressionCodec // parquet codec (default: 'UNCOMPRESSED'; SNAPPY rarely shrinks float embeddings and costs ~2-3x query latency. ZSTD on write isn't supported here — hyparquet-compressors only ships decompressors.)
   binary?: boolean // also write a 1-bit-per-dim sign-bit column for binary+rerank search (default: false; adds ~1.5% file size at 384-dim)
   pageSize?: number // target page size in bytes (default: 1 MB). Smaller pages let `useOffsetIndex` fetch tighter ranges in rerank phase 2 at the cost of more page-header overhead.
   clusters?: number // run binary k-means with this many clusters, sort rows by cluster id, and store centroids in KV metadata. Enables phase 1 row-group skipping at query time. Implies binary=true. Recommended: 64-256 for 100k vectors.
@@ -55,7 +55,7 @@ export interface SearchVectorsOptions {
    * actually scans. Can be expressed as:
    *   - an integer >= 1 (number of clusters)
    *   - a float in (0, 1] (fraction of total clusters)
-   * Lower values are faster but reduce recall. Default: 0.1 (scan 10% of clusters).
+   * Lower values are faster but reduce recall. Default: 0.25 (scan 25% of clusters).
    * Ignored when the file has no centroids.
    */
   probe?: number

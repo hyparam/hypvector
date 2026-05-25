@@ -23,9 +23,13 @@
 export function binaryKMeans(codes, binaryBytes, k, iterations = 6, seed = 1) {
   const n = codes.length
   if (n === 0) return { assignments: new Int32Array(0), centroids: [] }
+  if (binaryBytes % 4 !== 0) {
+    // The SWAR popcount loop iterates u32 words; tail bytes would be silently
+    // skipped. Dimensions like 384 → 48 bytes are fine; arbitrary dims aren't.
+    throw new Error(`binaryKMeans requires binaryBytes to be a multiple of 4, got ${binaryBytes}`)
+  }
   const effectiveK = Math.min(k, n)
   const wordsPerRow = binaryBytes >> 2
-  const tailBytes = binaryBytes - wordsPerRow * 4
 
   // Aligned U32 views over a flat backing buffer (one contiguous copy).
   const flat = new Uint8Array(n * binaryBytes)
@@ -106,7 +110,6 @@ export function binaryKMeans(codes, binaryBytes, k, iterations = 6, seed = 1) {
       if (counts[c] === 0) {
         // Reseed empty cluster from a random row.
         const r = rng() % n
-        flat.copyWithin(0, 0, 0) // noop just to keep linter calm
         centroids[c] = flat.slice(r * binaryBytes, (r + 1) * binaryBytes)
         continue
       }
@@ -124,8 +127,6 @@ export function binaryKMeans(codes, binaryBytes, k, iterations = 6, seed = 1) {
       centroids[c] = cb
     }
     centroidU32 = centroids.map(c => bytesToU32(c, wordsPerRow))
-    // Use tailBytes to silence unused warning (could be extended for non-u32 tails).
-    if (tailBytes < 0) throw new Error('unreachable')
   }
 
   return { assignments, centroids }

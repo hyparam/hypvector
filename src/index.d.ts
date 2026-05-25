@@ -21,7 +21,10 @@ export function readVectors(options: ReadVectorsOptions): AsyncGenerator<VectorR
 
 /**
  * Find the top-k nearest neighbors to a query vector by similarity.
- * Naive implementation: linear scan over all stored vectors.
+ *
+ * Picks the cheapest available path: clustered binary + float32 rerank when
+ * the file has centroids, binary + rerank when it has a binary column, or
+ * an exact full-scan when neither is present (or when `rerankFactor: 0`).
  */
 export function searchVectors(options: SearchVectorsOptions): Promise<SearchResult[]>
 

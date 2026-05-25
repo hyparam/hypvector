@@ -25,11 +25,10 @@ import { l2Normalize, packBinary, packFloat32 } from './utils.js'
  *   - `id`: STRING (caller-supplied id, coerced to string)
  *   - `vector`: FIXED_LEN_BYTE_ARRAY(4 * dimension) raw little-endian float32 bytes
  *   - `vector_bin`: FIXED_LEN_BYTE_ARRAY(dim/8) — written when `binary: true`
- *   - `cluster_id`: INT32 — written when `clusters > 0`; rows are sorted by it
- *     so row-group min/max stats let the searcher skip whole row groups.
  *
- * Format metadata is stored in parquet KV metadata so readers can unpack
- * vectors and use centroids without out-of-band coordination.
+ * When `clusters > 0`, rows are reordered by cluster id and the centroids
+ * plus per-cluster row counts are written to KV metadata; no cluster_id
+ * column is materialized.
  *
  * @param {WriteVectorsOptions} options
  * @returns {Promise<void>}
