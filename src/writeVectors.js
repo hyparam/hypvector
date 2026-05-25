@@ -1,7 +1,10 @@
 import { parquetWrite, schemaFromColumnData } from 'hyparquet-writer'
+import { binaryKMeans } from './cluster.js'
 import {
   defaultBinaryColumn,
   defaultBinaryPageSize,
+  defaultClusterColumn,
+  defaultClusterIterations,
   defaultIdColumn,
   defaultRowGroupSize,
   defaultVectorColumn,
@@ -17,15 +20,15 @@ import { l2Normalize, packBinary, packFloat32 } from './utils.js'
 /**
  * Write embedding vectors to a parquet file.
  *
- * v0 layout:
- *   - `id`: STRING (id of each vector, coerced to string)
- *   - `vector`: FIXED_LEN_BYTE_ARRAY(4 * dimension) (raw little-endian float32 bytes)
+ * Columns:
+ *   - `id`: STRING (caller-supplied id, coerced to string)
+ *   - `vector`: FIXED_LEN_BYTE_ARRAY(4 * dimension) raw little-endian float32 bytes
+ *   - `vector_bin`: FIXED_LEN_BYTE_ARRAY(dim/8) — written when `binary: true`
+ *   - `cluster_id`: INT32 — written when `clusters > 0`; rows are sorted by it
+ *     so row-group min/max stats let the searcher skip whole row groups.
  *
- * FIXED_LEN_BYTE_ARRAY avoids the 4-byte length prefix that BYTE_ARRAY writes
- * per row, and lets readers/writers know the row width up-front.
- *
- * Metadata about the format is stored in parquet KV metadata so readers can
- * unpack vectors without out-of-band coordination.
+ * Format metadata is stored in parquet KV metadata so readers can unpack
+ * vectors and use centroids without out-of-band coordination.
  *
  * @param {WriteVectorsOptions} options
  * @returns {Promise<void>}
@@ -40,15 +43,19 @@ export async function writeVectors({
   codec = 'UNCOMPRESSED',
   binary = false,
   pageSize,
+  clusters = 0,
+  clusterIterations = defaultClusterIterations,
+  clusterSeed = 1,
 }) {
   if (!Number.isInteger(dimension) || dimension <= 0) {
     throw new Error(`invalid dimension: ${dimension}`)
   }
+  if (clusters > 0 && !binary) {
+    // Clustering operates on binary codes; require the binary column too.
+    binary = true
+  }
 
-  // When writing a binary rerank column, default to small pages so that
-  // useOffsetIndex in phase 2 fetches only ~one page per candidate row.
   const effectivePageSize = pageSize ?? (binary ? defaultBinaryPageSize : undefined)
-
   const binaryBytes = (dimension + 7) >> 3
 
   /** @type {string[]} */
@@ -69,6 +76,39 @@ export async function writeVectors({
     if (packedBin) packedBin.push(packBinary(v, dimension))
   }
 
+  /** @type {number[] | null} */
+  let clusterIds = null
+  /** @type {Uint8Array[] | null} */
+  let centroids = null
+  if (clusters > 0 && packedBin) {
+    const { assignments, centroids: cs } = binaryKMeans(
+      packedBin, binaryBytes, clusters, clusterIterations, clusterSeed,
+    )
+    centroids = cs
+    // Sort indices by cluster id. Stable sort preserves input order within a cluster.
+    const order = new Int32Array(ids.length)
+    for (let i = 0; i < ids.length; i += 1) order[i] = i
+    const sorted = Array.from(order).sort((a, b) => assignments[a] - assignments[b])
+    const idsOut = new Array(ids.length)
+    const packedOut = new Array(ids.length)
+    const packedBinOut = new Array(ids.length)
+    const clusterOut = new Array(ids.length)
+    for (let i = 0; i < sorted.length; i += 1) {
+      const src = sorted[i]
+      idsOut[i] = ids[src]
+      packedOut[i] = packed[src]
+      packedBinOut[i] = packedBin[src]
+      clusterOut[i] = assignments[src]
+    }
+    ids.length = 0
+    ids.push(...idsOut)
+    packed.length = 0
+    packed.push(...packedOut)
+    packedBin.length = 0
+    packedBin.push(...packedBinOut)
+    clusterIds = clusterOut
+  }
+
   const kvMetadata = [
     { key: 'hypvector.version', value: String(hypVectorVersion) },
     { key: 'hypvector.dimension', value: String(dimension) },
@@ -76,7 +116,24 @@ export async function writeVectors({
     { key: 'hypvector.normalized', value: String(normalize) },
     { key: 'hypvector.binary', value: String(binary) },
     { key: 'hypvector.count', value: String(ids.length) },
+    { key: 'hypvector.clusters', value: String(centroids ? centroids.length : 0) },
   ]
+  if (centroids && clusterIds) {
+    // Pack centroids as one contiguous Uint8Array, then base64-encode.
+    const buf = new Uint8Array(centroids.length * binaryBytes)
+    for (let c = 0; c < centroids.length; c += 1) buf.set(centroids[c], c * binaryBytes)
+    kvMetadata.push({ key: 'hypvector.centroids', value: encodeBase64(buf) })
+
+    // Per-cluster row counts (Uint32, length = clusters). Rows are already
+    // sorted by cluster_id so cluster k occupies [cumsum[k], cumsum[k+1]).
+    // Storing counts (not offsets) keeps it small; reader computes cumsum.
+    const counts = new Uint32Array(centroids.length)
+    for (let i = 0; i < clusterIds.length; i += 1) counts[clusterIds[i]] += 1
+    kvMetadata.push({
+      key: 'hypvector.clusterCounts',
+      value: encodeBase64(new Uint8Array(counts.buffer, counts.byteOffset, counts.byteLength)),
+    })
+  }
 
   /** @type {ColumnSource[]} */
   const columnData = [
@@ -101,6 +158,9 @@ export async function writeVectors({
       repetition_type: 'REQUIRED',
     }
   }
+  if (clusterIds) {
+    columnData.push({ name: defaultClusterColumn, data: new Int32Array(clusterIds) })
+  }
 
   const schemaInput = columnData.map(c => c.name === defaultIdColumn ? { ...c, type: /** @type {const} */ ('STRING') } : c)
   const schema = schemaFromColumnData({ columnData: schemaInput, schemaOverrides })
@@ -114,4 +174,18 @@ export async function writeVectors({
     codec,
     ...(effectivePageSize !== undefined ? { pageSize: effectivePageSize } : {}),
   })
+}
+
+/**
+ * Base64 encode a Uint8Array. Uses Node's Buffer when available, falls back
+ * to btoa for browser environments.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
+function encodeBase64(bytes) {
+  if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64')
+  let s = ''
+  for (let i = 0; i < bytes.length; i += 1) s += String.fromCharCode(bytes[i])
+  return btoa(s)
 }

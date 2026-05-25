@@ -17,3 +17,13 @@ export const defaultIdColumn = 'id'
 // Smaller pages let useOffsetIndex fetch only the pages containing the
 // per-candidate rows in the rerank phase 2 scan.
 export const defaultBinaryPageSize = 64 * 1024
+
+// Default name of the cluster-id column when clustering is enabled.
+export const defaultClusterColumn = 'cluster_id'
+
+// Default number of k-means iterations when clustering.
+export const defaultClusterIterations = 6
+
+// Default fraction of clusters scanned in phase 1 at query time when the
+// file has cluster metadata. Lower = faster but lower recall.
+export const defaultClusterProbeFraction = 0.1
