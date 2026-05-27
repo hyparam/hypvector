@@ -1,9 +1,8 @@
 import { parquetRead } from 'hyparquet'
 import { defaultIdColumn, defaultPqColumn, defaultVectorColumn } from '../constants.js'
-import { buildPqTables } from '../pq.js'
-import { packBinary } from '../utils.js'
+import { buildIvfPqTable, selectIvfRanges } from '../pq.js'
 import { computeScore, pushHeap } from './heap.js'
-import { coalesceRuns, selectClusterRowRanges } from './ranges.js'
+import { coalesceRuns } from './ranges.js'
 
 /**
  * @import { DistanceMetric, HypVectorMetadata, SearchResult } from '../types.js'
@@ -11,8 +10,8 @@ import { coalesceRuns, selectClusterRowRanges } from './ranges.js'
  */
 
 /**
- * Product-quantized rerank path. Phase 1 scans compact PQ codes over the
- * selected cluster ranges, phase 2 fetches float32 vectors for the best
+ * IVF-PQ rerank path. Phase 1 scans compact residual PQ codes over the
+ * selected IVF list ranges, phase 2 fetches float32 vectors for the best
  * approximate candidates, and phase 3 fetches ids for the final winners.
  *
  * @param {object} options
@@ -30,14 +29,11 @@ import { coalesceRuns, selectClusterRowRanges } from './ranges.js'
  */
 export async function searchPq({ file, metadata, meta, queryF32, scoringMetric, reportedMetric, topK, rerankFactor, probe, compressors }) {
   const candidatesK = Math.max(topK * rerankFactor, topK)
-  const { table, approxMetric } = buildPqTables(queryF32, meta, scoringMetric)
 
   /** @type {{ rowIndex: number, score: number }[]} */
   const candidateHeap = []
 
-  const scanRanges = meta.centroids && meta.clusterCounts
-    ? selectClusterRowRanges(meta, packBinary(queryF32, meta.dimension), probe)
-    : [{ rowStart: 0, rowEnd: Number(metadata.num_rows) }]
+  const scanRanges = selectIvfRanges(meta, queryF32, scoringMetric, probe)
 
   await Promise.all(scanRanges.map(({ rowStart, rowEnd }) => parquetRead({
     file,
@@ -48,7 +44,7 @@ export async function searchPq({ file, metadata, meta, queryF32, scoringMetric, 
     rowEnd,
     onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
       if (columnName !== defaultPqColumn) return
-      scorePqChunk(columnData, chunkStart, meta, table, approxMetric, candidateHeap, candidatesK)
+      scorePqChunk(columnData, chunkStart, meta, scanRanges, queryF32, scoringMetric, candidateHeap, candidatesK)
     },
   })))
 
@@ -108,15 +104,18 @@ export async function searchPq({ file, metadata, meta, queryF32, scoringMetric, 
  * @param {import('hyparquet').DecodedArray} columnData
  * @param {number} rowStart
  * @param {HypVectorMetadata} meta
- * @param {Float32Array} table
- * @param {DistanceMetric} approxMetric
+ * @param {{ list: number, rowStart: number, rowEnd: number }[]} scanRanges
+ * @param {Float32Array} query
+ * @param {DistanceMetric} metric
  * @param {{ rowIndex: number, score: number }[]} heap
  * @param {number} candidatesK
  */
-function scorePqChunk(columnData, rowStart, meta, table, approxMetric, heap, candidatesK) {
+function scorePqChunk(columnData, rowStart, meta, scanRanges, query, metric, heap, candidatesK) {
   const rows = /** @type {Uint8Array[]} */ (columnData)
   const segments = meta.pqSegments ?? 0
   const centroids = meta.pqCentroids ?? 0
+  const range = findRange(scanRanges, rowStart)
+  const { table, approxMetric } = buildIvfPqTable(query, meta, metric, range?.list ?? 0)
   for (let i = 0; i < rows.length; i += 1) {
     const code = rows[i]
     let score = 0
@@ -125,6 +124,18 @@ function scorePqChunk(columnData, rowStart, meta, table, approxMetric, heap, can
     }
     pushHeap(heap, { rowIndex: rowStart + i, score }, candidatesK, approxMetric)
   }
+}
+
+/**
+ * @param {{ list: number, rowStart: number, rowEnd: number }[]} ranges
+ * @param {number} rowStart
+ * @returns {{ list: number, rowStart: number, rowEnd: number } | undefined}
+ */
+function findRange(ranges, rowStart) {
+  for (const range of ranges) {
+    if (rowStart >= range.rowStart && rowStart < range.rowEnd) return range
+  }
+  return undefined
 }
 
 /**

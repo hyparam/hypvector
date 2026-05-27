@@ -175,11 +175,13 @@ export function parseKvMetadata(metadata) {
     out.clusterCounts = new Uint32Array(aligned.buffer, 0, clusters)
   }
   if (hasPq) {
+    const pqMode = kv['hypvector.pq.mode'] ?? 'ivf'
     const pqSegments = parseInt(kv['hypvector.pq.segments'] ?? '0', 10)
     const pqCentroids = parseInt(kv['hypvector.pq.centroids'] ?? '0', 10)
     if (!pqSegments || !pqCentroids) {
       throw new Error('PQ metadata is missing segment or centroid count')
     }
+    out.pqMode = /** @type {HypVectorMetadata['pqMode']} */ (pqMode)
     out.pqSegments = pqSegments
     out.pqCentroids = pqCentroids
     if (kv['hypvector.pq.codebooks']) {
@@ -191,6 +193,30 @@ export function parseKvMetadata(metadata) {
       const aligned = new Uint8Array(bytes.byteLength)
       aligned.set(bytes)
       out.pqCodebooks = new Float32Array(aligned.buffer, 0, pqCentroids * dimension)
+    }
+    const ivfClusters = parseInt(kv['hypvector.ivf.clusters'] ?? '0', 10)
+    if (ivfClusters > 0) {
+      out.ivfClusters = ivfClusters
+      if (kv['hypvector.ivf.centroids']) {
+        const bytes = decodeBase64(kv['hypvector.ivf.centroids'])
+        const expectedBytes = ivfClusters * dimension * 4
+        if (bytes.byteLength !== expectedBytes) {
+          throw new Error(`IVF centroids length mismatch: ${bytes.byteLength} vs ${expectedBytes}`)
+        }
+        const aligned = new Uint8Array(bytes.byteLength)
+        aligned.set(bytes)
+        out.ivfCentroids = new Float32Array(aligned.buffer, 0, ivfClusters * dimension)
+      }
+      if (kv['hypvector.ivf.counts']) {
+        const bytes = decodeBase64(kv['hypvector.ivf.counts'])
+        const expectedBytes = ivfClusters * 4
+        if (bytes.byteLength !== expectedBytes) {
+          throw new Error(`IVF counts length mismatch: ${bytes.byteLength} vs ${expectedBytes}`)
+        }
+        const aligned = new Uint8Array(bytes.byteLength)
+        aligned.set(bytes)
+        out.ivfCounts = new Uint32Array(aligned.buffer, 0, ivfClusters)
+      }
     }
   }
   return out

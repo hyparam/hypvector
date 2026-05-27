@@ -5,6 +5,9 @@ import {
   defaultBinaryPageSize,
   defaultClusterIterations,
   defaultIdColumn,
+  defaultIvfClusters,
+  defaultIvfIterations,
+  defaultIvfSampleSize,
   defaultPqCentroids,
   defaultPqColumn,
   defaultPqIterations,
@@ -14,7 +17,7 @@ import {
   defaultVectorColumn,
   hypVectorVersion,
 } from './constants.js'
-import { buildPq } from './pq.js'
+import { buildIvfPq } from './pq.js'
 import { encodeBase64, l2Normalize, packBinary, packFloat32 } from './utils.js'
 
 /**
@@ -32,9 +35,9 @@ import { encodeBase64, l2Normalize, packBinary, packFloat32 } from './utils.js'
  *   - `vector_bin`: FIXED_LEN_BYTE_ARRAY(dim/8) — written when `binary: true`
  *   - `vector_pq`: FIXED_LEN_BYTE_ARRAY(pqSegments) — written when `pq: true`
  *
- * When `clusters > 0`, rows are reordered by cluster id and the centroids
- * plus per-cluster row counts are written to KV metadata; no cluster_id
- * column is materialized.
+ * When `clusters > 0`, rows are reordered by binary cluster id. When
+ * `pq: true`, rows are reordered by IVF list id. These layouts are mutually
+ * exclusive because both define contiguous row ranges for search.
  *
  * @param {WriteVectorsOptions} options
  * @returns {Promise<void>}
@@ -58,6 +61,9 @@ export async function writeVectors({
   pqIterations = defaultPqIterations,
   pqSampleSize = defaultPqSampleSize,
   pqSeed = 1,
+  ivfClusters = defaultIvfClusters,
+  ivfIterations = defaultIvfIterations,
+  ivfSampleSize = defaultIvfSampleSize,
 }) {
   if (!Number.isInteger(dimension) || dimension <= 0) {
     throw new Error(`invalid dimension: ${dimension}`)
@@ -65,6 +71,9 @@ export async function writeVectors({
   if (clusters > 0 && !binary) {
     // Clustering operates on binary codes; require the binary column too.
     binary = true
+  }
+  if (pq && clusters > 0) {
+    throw new Error('writeVectors: `pq` uses IVF row ordering; do not combine it with binary `clusters`')
   }
 
   const effectivePageSize = pageSize ?? (binary || pq ? defaultBinaryPageSize : undefined)
@@ -97,22 +106,59 @@ export async function writeVectors({
   let packedPq = null
   /** @type {Float32Array | null} */
   let pqCodebooks = null
+  /** @type {Float32Array | null} */
+  let ivfCentroids = null
+  /** @type {Uint32Array | null} */
+  let ivfCounts = null
+  /** @type {Int32Array | null} */
+  let ivfAssignments = null
   let pqSegmentsOut = 0
   let pqCentroidsOut = 0
+  let ivfClustersOut = 0
   if (vectorsForPq) {
-    const built = buildPq({
+    const built = buildIvfPq({
       vectors: vectorsForPq,
       dimension,
-      segments: pqSegments,
-      centroids: pqCentroids,
-      iterations: pqIterations,
-      sampleSize: pqSampleSize,
+      ivfClusters,
+      ivfIterations,
+      ivfSampleSize,
+      pqSegments,
+      pqCentroids,
+      pqIterations,
+      pqSampleSize,
       seed: pqSeed,
     })
     packedPq = built.codes
     pqCodebooks = built.codebooks
-    pqSegmentsOut = built.segments
-    pqCentroidsOut = built.centroids
+    ivfCentroids = built.ivfCentroids
+    ivfCounts = built.ivfCounts
+    ivfAssignments = built.assignments
+    pqSegmentsOut = built.pqSegments
+    pqCentroidsOut = built.pqCentroids
+    ivfClustersOut = built.ivfClusters
+  }
+
+  if (packedPq && ivfAssignments) {
+    const order = new Int32Array(ids.length)
+    for (let i = 0; i < ids.length; i += 1) order[i] = i
+    const sorted = Array.from(order).sort((a, b) => ivfAssignments[a] - ivfAssignments[b])
+    const idsOut = new Array(ids.length)
+    const packedOut = new Array(ids.length)
+    const packedBinOut = packedBin ? new Array(ids.length) : null
+    const packedPqOut = new Array(ids.length)
+    for (let i = 0; i < sorted.length; i += 1) {
+      const src = sorted[i]
+      idsOut[i] = ids[src]
+      packedOut[i] = packed[src]
+      if (packedBinOut && packedBin) packedBinOut[i] = packedBin[src]
+      packedPqOut[i] = packedPq[src]
+    }
+    for (let i = 0; i < ids.length; i += 1) {
+      ids[i] = idsOut[i]
+      packed[i] = packedOut[i]
+      if (packedBinOut && packedBin) packedBin[i] = packedBinOut[i]
+      packedPq[i] = packedPqOut[i]
+    }
   }
 
   /** @type {Uint8Array[] | null} */
@@ -180,12 +226,24 @@ export async function writeVectors({
     })
   }
   if (packedPq && pqCodebooks) {
+    kvMetadata.push({ key: 'hypvector.pq.mode', value: 'ivf' })
     kvMetadata.push({ key: 'hypvector.pq.segments', value: String(pqSegmentsOut) })
     kvMetadata.push({ key: 'hypvector.pq.centroids', value: String(pqCentroidsOut) })
     kvMetadata.push({
       key: 'hypvector.pq.codebooks',
       value: encodeBase64(new Uint8Array(pqCodebooks.buffer, pqCodebooks.byteOffset, pqCodebooks.byteLength)),
     })
+    if (ivfCentroids && ivfCounts) {
+      kvMetadata.push({ key: 'hypvector.ivf.clusters', value: String(ivfClustersOut) })
+      kvMetadata.push({
+        key: 'hypvector.ivf.centroids',
+        value: encodeBase64(new Uint8Array(ivfCentroids.buffer, ivfCentroids.byteOffset, ivfCentroids.byteLength)),
+      })
+      kvMetadata.push({
+        key: 'hypvector.ivf.counts',
+        value: encodeBase64(new Uint8Array(ivfCounts.buffer, ivfCounts.byteOffset, ivfCounts.byteLength)),
+      })
+    }
   }
 
   /** @type {ColumnSource[]} */
@@ -228,7 +286,7 @@ export async function writeVectors({
   // chunk per cluster — drops fetches roughly proportional to clusters
   // probed. Caller-supplied rowGroupSize wins if explicitly passed.
   const effectiveRowGroupSize = rowGroupSize ?? (
-    clusterCounts ? Array.from(clusterCounts) : defaultRowGroupSize
+    ivfCounts ? Array.from(ivfCounts) : clusterCounts ? Array.from(clusterCounts) : defaultRowGroupSize
   )
 
   await parquetWrite({

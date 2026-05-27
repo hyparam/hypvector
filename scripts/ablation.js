@@ -7,7 +7,7 @@
  *   A) base               vector + id only  (search must use exact full scan)
  *   B) +binary            adds vector_bin column (binary phase 1 + per-cand phase 2 reads)
  *   C) +cluster           B plus k-means clustering + centroids/counts KV
- *   D) +PQ                C plus vector_pq column + PQ codebooks
+ *   D) IVF-PQ             vector_pq column + IVF centroids + residual PQ codebooks
  *
  * Page size is held at 32 KB for B-D so we isolate the feature contribution
  * from the page-size knob.
@@ -41,7 +41,7 @@ const variants = [
   { name: 'A_base', label: 'A) base (vec only)', opts: { binary: false } },
   { name: 'B_binary', label: 'B) +binary', opts: { binary: true } },
   { name: 'C_cluster', label: 'C) +cluster', opts: { binary: true, clusters: 128 } },
-  { name: 'D_pq', label: 'D) +cluster+PQ', opts: { binary: true, clusters: 128, pq: true }, search: { algorithm: 'pq' } },
+  { name: 'D_ivfpq', label: 'D) IVF-PQ', opts: { pq: true, ivfClusters: 128 }, search: { algorithm: 'pq' } },
 ]
 
 for (const v of variants) {

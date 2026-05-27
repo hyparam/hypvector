@@ -23,12 +23,15 @@ export interface WriteVectorsOptions {
   clusters?: number // run binary k-means with this many clusters, sort rows by cluster id, and store centroids in KV metadata. Enables phase 1 row-group skipping at query time. Implies binary=true. Recommended: 64-256 for 100k vectors.
   clusterIterations?: number // k-means iterations (default: 6)
   clusterSeed?: number // RNG seed for deterministic clustering (default: 1)
-  pq?: boolean // write a product-quantized code column and codebooks. Search uses PQ approximate scoring before exact float32 rerank. When combined with clusters, PQ scans only the selected cluster row ranges.
+  pq?: boolean // write an IVF-PQ index: float IVF centroids, residual PQ codes, and residual PQ codebooks. Search uses approximate IVF-PQ scoring before exact float32 rerank.
   pqSegments?: number // number of PQ sub-vectors / bytes per code (default: 32, capped to dimension)
-  pqCentroids?: number // centroids per sub-vector, 2-256 (default: 16)
+  pqCentroids?: number // centroids per sub-vector, 2-256 (default: 64)
   pqIterations?: number // k-means iterations per PQ sub-vector (default: 8)
   pqSampleSize?: number // deterministic training sample size per sub-vector (default: 4096)
   pqSeed?: number // RNG seed for empty-codebook reseeding (default: 1)
+  ivfClusters?: number // number of IVF coarse clusters / row groups for PQ files (default: 128)
+  ivfIterations?: number // k-means iterations for IVF centroids (default: 6)
+  ivfSampleSize?: number // deterministic IVF training sample size (default: 4096)
 }
 
 export interface ReadVectorsOptions {
@@ -138,5 +141,9 @@ export interface HypVectorMetadata {
   clusterCounts?: Uint32Array // number of rows in each cluster; cluster k spans [cumsum[k], cumsum[k+1])
   pqSegments?: number // number of PQ sub-vectors / bytes per code
   pqCentroids?: number // number of PQ centroids per sub-vector
-  pqCodebooks?: Float32Array // segment-major codebooks, length pqCentroids * dimension
+  pqMode?: 'ivf' // PQ index mode
+  pqCodebooks?: Float32Array // segment-major residual codebooks, length pqCentroids * dimension
+  ivfClusters?: number // number of non-empty IVF lists
+  ivfCentroids?: Float32Array // IVF centroids, length ivfClusters * dimension
+  ivfCounts?: Uint32Array // number of rows in each IVF list; list k spans [cumsum[k], cumsum[k+1])
 }

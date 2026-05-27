@@ -33,9 +33,14 @@ export const defaultClusterIterations = 6
 // file has cluster metadata. Lower = faster but lower recall.
 export const defaultClusterProbeFraction = 0.25
 
-// Default product quantization settings. The initial PQ path stores one
-// code byte per segment, with values in [0, defaultPqCentroids).
+// Default residual product quantization settings. The IVF-PQ path stores
+// one code byte per segment, with values in [0, defaultPqCentroids).
 export const defaultPqSegments = 32
-export const defaultPqCentroids = 16
+export const defaultPqCentroids = 64
 export const defaultPqIterations = 8
 export const defaultPqSampleSize = 4096
+
+// Default IVF coarse quantizer settings for the IVF-PQ path.
+export const defaultIvfClusters = 128
+export const defaultIvfIterations = 6
+export const defaultIvfSampleSize = 4096

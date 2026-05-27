@@ -66,7 +66,7 @@ await writeVectors({
   normalize: true,    // L2-normalize on write; lets search skip sqrt for cosine
   binary: true,       // also write 1-bit-per-dim sign column for binary+rerank search
   clusters: 128,      // k-means clusters for phase-1 pruning (implies binary: true)
-  pq: true,           // optional product-quantized codes for approximate scoring before rerank
+  pq: true,           // optional IVF-PQ index for approximate scoring before rerank
   vectors: myEmbedder(), // any sync or async iterable of { id, vector }
 })
 ```
@@ -181,7 +181,7 @@ Core columns: `id` (STRING), `vector` (`FIXED_LEN_BYTE_ARRAY(4 × dim)`, raw flo
 
 A `cachedAsyncBuffer` deduplicates footer / offset-index byte ranges across all the parallel `parquetRead` calls.
 
-**PQ + rerank path** (`algorithm: 'pq'`, or `auto` when a file has PQ but no binary column): scan compact `vector_pq` codes over the selected cluster ranges, approximate-score candidates with lookup tables built from the query and stored PQ codebooks, then fetch full float32 vectors only for the candidate pool and exact-rerank as above. When `clusters > 0`, PQ uses the same contiguous cluster row ranges as the binary path.
+**IVF-PQ + rerank path** (`algorithm: 'pq'`, or `auto` when a file has PQ but no binary column): rank stored float IVF centroids against the query, scan compact residual `vector_pq` codes over the selected IVF row groups, approximate-score candidates with lookup tables built from the query, IVF centroid, and residual PQ codebooks, then fetch full float32 vectors only for the candidate pool and exact-rerank as above. IVF-PQ uses its own row ordering and should not be combined with binary `clusters`.
 
 For pre-normalized vectors with `metric: 'cosine'`, the search normalizes the query once and scores via dot product to skip the per-candidate sqrt loop.
 
@@ -208,9 +208,13 @@ Key-value metadata:
 | `hypvector.clusters` | number of k-means clusters (0 if not clustered) |
 | `hypvector.centroids` | base64-encoded centroid binary codes (`clusters × dim/8` bytes); present when `clusters > 0` |
 | `hypvector.clusterCounts` | base64-encoded `Uint32Array` of per-cluster row counts; present when `clusters > 0` |
+| `hypvector.pq.mode` | `ivf`; present when `pq: true` |
 | `hypvector.pq.segments` | number of PQ sub-vectors / bytes per code; present when `pq: true` |
 | `hypvector.pq.centroids` | centroids per PQ sub-vector; present when `pq: true` |
-| `hypvector.pq.codebooks` | base64-encoded `Float32Array` codebooks (`pq.centroids × dim` floats); present when `pq: true` |
+| `hypvector.pq.codebooks` | base64-encoded residual `Float32Array` codebooks (`pq.centroids × dim` floats); present when `pq: true` |
+| `hypvector.ivf.clusters` | number of non-empty IVF lists; present when `pq: true` |
+| `hypvector.ivf.centroids` | base64-encoded float IVF centroids (`ivf.clusters × dim` float32 values); present when `pq: true` |
+| `hypvector.ivf.counts` | base64-encoded `Uint32Array` of per-IVF-list row counts; present when `pq: true` |
 
 ### CLI
 
