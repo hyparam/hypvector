@@ -2,6 +2,7 @@ import type { AsyncBuffer, CompressionCodec, Compressors, FileMetaData } from 'h
 import type { Writer } from 'hyparquet-writer'
 
 export type DistanceMetric = 'cosine' | 'dot' | 'euclidean'
+export type SearchAlgorithm = 'auto' | 'exact' | 'binary' | 'pq'
 
 export interface VectorRecord {
   id: string | number
@@ -22,6 +23,12 @@ export interface WriteVectorsOptions {
   clusters?: number // run binary k-means with this many clusters, sort rows by cluster id, and store centroids in KV metadata. Enables phase 1 row-group skipping at query time. Implies binary=true. Recommended: 64-256 for 100k vectors.
   clusterIterations?: number // k-means iterations (default: 6)
   clusterSeed?: number // RNG seed for deterministic clustering (default: 1)
+  pq?: boolean // write a product-quantized code column and codebooks. Search uses PQ approximate scoring before exact float32 rerank. When combined with clusters, PQ scans only the selected cluster row ranges.
+  pqSegments?: number // number of PQ sub-vectors / bytes per code (default: 32, capped to dimension)
+  pqCentroids?: number // centroids per sub-vector, 2-256 (default: 16)
+  pqIterations?: number // k-means iterations per PQ sub-vector (default: 8)
+  pqSampleSize?: number // deterministic training sample size per sub-vector (default: 4096)
+  pqSeed?: number // RNG seed for empty-codebook reseeding (default: 1)
 }
 
 export interface ReadVectorsOptions {
@@ -76,6 +83,13 @@ export interface SearchVectorsOptions {
   rerankFactor?: number
 
   /**
+   * Search strategy. `auto` preserves the current default priority:
+   * binary+rerank when a binary column exists, PQ+rerank when only PQ exists,
+   * otherwise exact full scan. Use `pq` to benchmark or force the PQ path.
+   */
+  algorithm?: SearchAlgorithm
+
+  /**
    * When the file is clustered, this controls how many clusters phase 1
    * actually scans. Can be expressed as:
    *   - an integer >= 1 (number of clusters)
@@ -117,8 +131,12 @@ export interface HypVectorMetadata {
   metric: DistanceMetric // intended distance metric
   normalized: boolean // whether vectors were l2-normalized on write
   hasBinary: boolean // whether a `vector_bin` sign-bit column is present
+  hasPq: boolean // whether a `vector_pq` product-quantized code column is present
   count: number // number of vectors
   clusters: number // number of k-means clusters used to sort rows (0 = not clustered)
   centroids?: Uint8Array[] // binary centroids (length == clusters), each binaryBytes long
   clusterCounts?: Uint32Array // number of rows in each cluster; cluster k spans [cumsum[k], cumsum[k+1])
+  pqSegments?: number // number of PQ sub-vectors / bytes per code
+  pqCentroids?: number // number of PQ centroids per sub-vector
+  pqCodebooks?: Float32Array // segment-major codebooks, length pqCentroids * dimension
 }

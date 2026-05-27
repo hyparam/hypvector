@@ -148,13 +148,14 @@ export function parseKvMetadata(metadata) {
   const metric = /** @type {HypVectorMetadata['metric']} */ (kv['hypvector.metric'] ?? 'cosine')
   const normalized = kv['hypvector.normalized'] === 'true'
   const hasBinary = kv['hypvector.binary'] === 'true'
+  const hasPq = kv['hypvector.pq'] === 'true'
   const count = Number(metadata.num_rows)
   const clusters = parseInt(kv['hypvector.clusters'] ?? '0', 10)
   if (!dimension) {
     throw new Error('Not a hypvector parquet file: missing hypvector.dimension metadata')
   }
   /** @type {HypVectorMetadata} */
-  const out = { version, dimension, metric, normalized, hasBinary, count, clusters }
+  const out = { version, dimension, metric, normalized, hasBinary, hasPq, count, clusters }
   if (clusters > 0 && kv['hypvector.centroids']) {
     const binaryBytes = dimension + 7 >> 3
     const bytes = decodeBase64(kv['hypvector.centroids'])
@@ -173,6 +174,25 @@ export function parseKvMetadata(metadata) {
     aligned.set(bytes)
     out.clusterCounts = new Uint32Array(aligned.buffer, 0, clusters)
   }
+  if (hasPq) {
+    const pqSegments = parseInt(kv['hypvector.pq.segments'] ?? '0', 10)
+    const pqCentroids = parseInt(kv['hypvector.pq.centroids'] ?? '0', 10)
+    if (!pqSegments || !pqCentroids) {
+      throw new Error('PQ metadata is missing segment or centroid count')
+    }
+    out.pqSegments = pqSegments
+    out.pqCentroids = pqCentroids
+    if (kv['hypvector.pq.codebooks']) {
+      const bytes = decodeBase64(kv['hypvector.pq.codebooks'])
+      const expectedBytes = pqCentroids * dimension * 4
+      if (bytes.byteLength !== expectedBytes) {
+        throw new Error(`PQ codebooks length mismatch: ${bytes.byteLength} vs ${expectedBytes}`)
+      }
+      const aligned = new Uint8Array(bytes.byteLength)
+      aligned.set(bytes)
+      out.pqCodebooks = new Float32Array(aligned.buffer, 0, pqCentroids * dimension)
+    }
+  }
   return out
 }
 
@@ -180,10 +200,24 @@ export function parseKvMetadata(metadata) {
  * @param {string} s
  * @returns {Uint8Array}
  */
-function decodeBase64(s) {
+export function decodeBase64(s) {
   if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(s, 'base64'))
   const bin = atob(s)
   const out = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i)
   return out
+}
+
+/**
+ * Base64 encode a Uint8Array. Uses Node's Buffer when available, falls back
+ * to btoa for browser environments.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
+export function encodeBase64(bytes) {
+  if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64')
+  let s = ''
+  for (let i = 0; i < bytes.length; i += 1) s += String.fromCharCode(bytes[i])
+  return btoa(s)
 }

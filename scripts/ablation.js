@@ -6,8 +6,8 @@
  * Variants:
  *   A) base               vector + id only  (search must use exact full scan)
  *   B) +binary            adds vector_bin column (binary phase 1 + per-cand phase 2 reads)
- *   C) +cluster           B plus k-means clustering + cluster_id col + centroids/counts KV
- *   D) +int8              C plus vector_i8 column (int8 cascade between phases 1 and 2)
+ *   C) +cluster           B plus k-means clustering + centroids/counts KV
+ *   D) +PQ                C plus vector_pq column + PQ codebooks
  *
  * Page size is held at 32 KB for B-D so we isolate the feature contribution
  * from the page-size knob.
@@ -41,6 +41,7 @@ const variants = [
   { name: 'A_base', label: 'A) base (vec only)', opts: { binary: false } },
   { name: 'B_binary', label: 'B) +binary', opts: { binary: true } },
   { name: 'C_cluster', label: 'C) +cluster', opts: { binary: true, clusters: 128 } },
+  { name: 'D_pq', label: 'D) +cluster+PQ', opts: { binary: true, clusters: 128, pq: true }, search: { algorithm: 'pq' } },
 ]
 
 for (const v of variants) {
@@ -130,6 +131,7 @@ for (const v of variants) {
   const opts = {}
   // For base file, rerankFactor=0 forces exact path. For others, default rerank/probe.
   if (v.name === 'A_base') opts.rerankFactor = 0
+  Object.assign(opts, v.search)
   const r = await bench(v.path, opts)
   let hits = 0, total = 0
   for (let q = 0; q < ref.tops.length; q += 1) {

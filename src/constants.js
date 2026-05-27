@@ -13,6 +13,9 @@ export const defaultVectorColumn = 'vector'
 // Default name of the binary (sign-bit) rerank column
 export const defaultBinaryColumn = 'vector_bin'
 
+// Default name of the product-quantized vector code column
+export const defaultPqColumn = 'vector_pq'
+
 // Default name of the id column
 export const defaultIdColumn = 'id'
 
@@ -29,3 +32,10 @@ export const defaultClusterIterations = 6
 // Default fraction of clusters scanned in phase 1 at query time when the
 // file has cluster metadata. Lower = faster but lower recall.
 export const defaultClusterProbeFraction = 0.25
+
+// Default product quantization settings. The initial PQ path stores one
+// code byte per segment, with values in [0, defaultPqCentroids).
+export const defaultPqSegments = 32
+export const defaultPqCentroids = 16
+export const defaultPqIterations = 8
+export const defaultPqSampleSize = 4096
