@@ -5,3 +5,4 @@ data
 *.tgz
 *.parquet
 .DS_Store
+.env

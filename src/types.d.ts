@@ -2,7 +2,7 @@ import type { AsyncBuffer, CompressionCodec, Compressors, FileMetaData } from 'h
 import type { Writer } from 'hyparquet-writer'
 
 export type DistanceMetric = 'cosine' | 'dot' | 'euclidean'
-export type SearchAlgorithm = 'auto' | 'exact' | 'binary' | 'pq'
+export type SearchAlgorithm = 'auto' | 'exact' | 'binary'
 
 export interface VectorRecord {
   id: string | number
@@ -23,15 +23,6 @@ export interface WriteVectorsOptions {
   clusters?: number // run binary k-means with this many clusters, sort rows by cluster id, and store centroids in KV metadata. Enables phase 1 row-group skipping at query time. Implies binary=true. Default: auto — `round(sqrt(N)/2)` when both `binary` and `clusters` are omitted (i.e. the caller is using full auto mode) and N ≥ 10000, otherwise 0. Pass `0` to force-disable.
   clusterIterations?: number // k-means iterations (default: 6)
   clusterSeed?: number // RNG seed for deterministic clustering (default: 1)
-  pq?: boolean // write an IVF-PQ index: float IVF centroids, residual PQ codes, and residual PQ codebooks. Search uses approximate IVF-PQ scoring before exact float32 rerank.
-  pqSegments?: number // number of PQ sub-vectors / bytes per code (default: 32, capped to dimension)
-  pqCentroids?: number // centroids per sub-vector, 2-256 (default: 64)
-  pqIterations?: number // k-means iterations per PQ sub-vector (default: 8)
-  pqSampleSize?: number // deterministic training sample size per sub-vector (default: 4096)
-  pqSeed?: number // RNG seed for empty-codebook reseeding (default: 1)
-  ivfClusters?: number // number of IVF coarse clusters / row groups for PQ files (default: 128)
-  ivfIterations?: number // k-means iterations for IVF centroids (default: 6)
-  ivfSampleSize?: number // deterministic IVF training sample size (default: 4096)
 }
 
 export interface ReadVectorsOptions {
@@ -87,8 +78,8 @@ export interface SearchVectorsOptions {
 
   /**
    * Search strategy. `auto` preserves the current default priority:
-   * binary+rerank when a binary column exists, PQ+rerank when only PQ exists,
-   * otherwise exact full scan. Use `pq` to benchmark or force the PQ path.
+   * binary+rerank when a binary column exists, otherwise exact full scan.
+   * `exact` forces a full scan; `binary` forces the binary+rerank path.
    */
   algorithm?: SearchAlgorithm
 
@@ -134,15 +125,8 @@ export interface HypVectorMetadata {
   metric: DistanceMetric // intended distance metric
   normalized: boolean // whether vectors were l2-normalized on write
   hasBinary: boolean // whether a `vector_bin` sign-bit column is present
-  hasPq: boolean // whether a `vector_pq` product-quantized code column is present
   count: number // number of vectors
   clusters: number // number of k-means clusters used to sort rows (0 = not clustered)
   centroids?: Uint8Array[] // binary centroids (length == clusters), each binaryBytes long
   clusterCounts?: Uint32Array // number of rows in each cluster; cluster k spans [cumsum[k], cumsum[k+1])
-  pqSegments?: number // number of PQ sub-vectors / bytes per code
-  pqCentroids?: number // number of PQ centroids per sub-vector
-  pqCodebooks?: Float32Array // segment-major residual codebooks, length pqCentroids * dimension
-  ivfClusters?: number // number of non-empty IVF lists
-  ivfCentroids?: Float32Array // IVF centroids, length ivfClusters * dimension
-  ivfCounts?: Uint32Array // number of rows in each IVF list; list k spans [cumsum[k], cumsum[k+1])
 }

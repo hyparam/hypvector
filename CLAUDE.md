@@ -22,32 +22,32 @@ npm run benchmark   # write + search benchmark
 
 Vectors are stored in a single Parquet file with two columns:
 
-- `id` (STRING) — caller-supplied identifier, coerced to string
-- `vector` (FIXED_LEN_BYTE_ARRAY, `type_length = 4 * dimension`) — raw little-endian float32 bytes
+- `id` (STRING): caller-supplied identifier, coerced to string
+- `vector` (FIXED_LEN_BYTE_ARRAY, `type_length = 4 * dimension`): raw little-endian float32 bytes
 
 Format-level info lives in Parquet KV metadata so readers don't need out-of-band coordination:
 
-- `hypvector.version` — index format version
-- `hypvector.dimension` — length of each vector
-- `hypvector.metric` — intended similarity metric (`cosine` | `dot` | `euclidean`)
-- `hypvector.normalized` — whether vectors were L2-normalized on write
-- `hypvector.count` — vector count
+- `hypvector.version`: index format version
+- `hypvector.dimension`: length of each vector
+- `hypvector.metric`: intended similarity metric (`cosine` | `dot` | `euclidean`)
+- `hypvector.normalized`: whether vectors were L2-normalized on write
+- `hypvector.count`: vector count
 
 ### Core modules (`src/`)
 
-- `writeVectors.js` — packs each vector to float32 bytes and writes to a Parquet `BYTE_ARRAY` column. Accepts sync or async iterables.
-- `readVectors.js` — async generator that yields `{ id, vector }` records, unpacking bytes back to `Float32Array`.
-- `searchVectors.js` — linear-scan top-k search. Streams every vector, computes the chosen metric, keeps a bounded result set.
-- `utils.js` — `cosineSimilarity`, `dotProduct`, `euclideanDistance`, `l2Normalize`, plus `packFloat32` / `unpackFloat32` / `parseKvMetadata`.
-- `constants.js` — version and defaults.
+- `writeVectors.js`: packs each vector to float32 bytes and writes to a Parquet `BYTE_ARRAY` column. Accepts sync or async iterables.
+- `readVectors.js`: async generator that yields `{ id, vector }` records, unpacking bytes back to `Float32Array`.
+- `searchVectors.js`: linear-scan top-k search. Streams every vector, computes the chosen metric, keeps a bounded result set.
+- `utils.js`: `cosineSimilarity`, `dotProduct`, `euclideanDistance`, `l2Normalize`, plus `packFloat32` / `unpackFloat32` / `parseKvMetadata`.
+- `constants.js`: version and defaults.
 
 ### Known limitations (intentional for v0)
 
-- **Linear scan only** — no ANN index, no partitioning, no inverted lists.
-- **Full file read for search** — every query reads the entire `vector` column.
-- **No quantization** — float32 only; int8 / binary / product quantization are future experiments.
-- **PLAIN encoding** — no `BYTE_STREAM_SPLIT` or other float-friendly encoding yet.
-- **No batching API** — `writeVectors` materializes all packed bytes before writing.
+- **Linear scan only**: no ANN index, no partitioning, no inverted lists.
+- **Full file read for search**: every query reads the entire `vector` column.
+- **No quantization**: float32 only; int8 / binary / product quantization are future experiments.
+- **PLAIN encoding**: no `BYTE_STREAM_SPLIT` or other float-friendly encoding yet.
+- **No batching API**: `writeVectors` materializes all packed bytes before writing.
 
 These are intentional starting points; each one is a candidate for a future experiment.
 
@@ -68,8 +68,8 @@ These are intentional starting points; each one is a candidate for a future expe
 
 ## Dependencies
 
-- **hyparquet** — Parquet reading
-- **hyparquet-writer** — Parquet writing
-- **hyparquet-compressors** — Compression codecs
+- **hyparquet**: Parquet reading
+- **hyparquet-writer**: Parquet writing
+- **hyparquet-compressors**: Compression codecs
 
 All three are maintained by Hyperparam.

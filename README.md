@@ -6,7 +6,7 @@
 
 ## What is hypvector?
 
-**HypVector** is a JavaScript library for storing and querying embedding vectors directly out of [Apache Parquet](https://parquet.apache.org) files. It builds on [`hyparquet`](https://github.com/hyparam/hyparquet) and [`hyparquet-writer`](https://github.com/hyparam/hyparquet-writer) so that a Parquet file on S3 (or local disk) acts as the vector database — any client can run similarity search over HTTP range requests, without a server in between.
+**HypVector** is a JavaScript library for storing and querying embedding vectors directly out of [Apache Parquet](https://parquet.apache.org) files. It builds on [`hyparquet`](https://github.com/hyparam/hyparquet) and [`hyparquet-writer`](https://github.com/hyparam/hyparquet-writer) so that a Parquet file on S3 (or local disk) acts as the vector database. Any client can run similarity search over HTTP range requests, without a server in between.
 
  - Works in browsers and node.js
  - Self-describing files (dimension, metric, normalization, cluster centroids in Parquet KV metadata)
@@ -68,7 +68,7 @@ await writeVectors({
 })
 ```
 
-By default, `writeVectors` adds the binary sign-bit column and clusters rows automatically once the corpus crosses ~10k vectors. Below that, files are written as plain id + vector columns and search uses an exact full scan. To control these manually, pass `binary: true/false` and `clusters: <n>`; passing either disables the auto behavior for that knob. When the binary column is written, `pageSize` defaults to 32 KB so offset-index reads during search fetch tight ranges. Pass `pq: true` to additionally write an IVF-PQ index for approximate scoring before rerank (mutually exclusive with binary `clusters`).
+By default, `writeVectors` adds the binary sign-bit column and clusters rows automatically once the corpus crosses ~10k vectors. Below that, files are written as plain id + vector columns and search uses an exact full scan. To control these manually, pass `binary: true/false` and `clusters: <n>`; passing either disables the auto behavior for that knob. When the binary column is written, `pageSize` defaults to 32 KB so offset-index reads during search fetch tight ranges.
 
 ### Producing vectors
 
@@ -76,7 +76,7 @@ HypVector is BYO-embedding: you decide which model produces the vectors. It just
 
 1. **Same model on write and query.** Embeddings from different models aren't comparable.
 2. **Same `dimension`** for every record (must match the `dimension` you pass to `writeVectors`).
-3. **`normalize: true`** is the right default for any model whose vectors aren't already unit-length and you intend to query with cosine — it saves the per-candidate sqrt at query time. If your model already normalizes (most modern sentence-transformer models do), still pass `normalize: true` so the flag is recorded in KV metadata.
+3. **`normalize: true`** is the right default for any model whose vectors aren't already unit-length and you intend to query with cosine; it saves the per-candidate sqrt at query time. If your model already normalizes (most modern sentence-transformer models do), still pass `normalize: true` so the flag is recorded in KV metadata.
 
 The natural shape is an async generator that yields embedded records as you batch them through your embedder.
 
@@ -151,7 +151,7 @@ const results = await searchVectors({
   source: 'https://example.com/vectors.parquet', // URL, local file path, or an open AsyncBuffer
   query: queryVec,    // Float32Array of length `dimension`
   topK: 10,
-  algorithm: 'auto', // 'auto' | 'exact' | 'binary' | 'pq'
+  algorithm: 'auto', // 'auto' | 'exact' | 'binary'
   rerankFactor: 10,   // candidate pool = topK * rerankFactor (default 10). Set to 0 to force exact full scan.
   probe: 0.25,        // fraction of clusters to scan in phase 1 (default 0.25). Set to 1 to scan all clusters; pass an integer > 1 for an absolute count.
 })
@@ -163,20 +163,18 @@ const results = await searchVectors({
 
 ### How it works
 
-Core columns: `id` (STRING), `vector` (`FIXED_LEN_BYTE_ARRAY(4 × dim)`, raw float32 bytes, `UNCOMPRESSED`), and optional ANN columns: `vector_bin` (`FIXED_LEN_BYTE_ARRAY(dim/8)`, 1 bit per dim) when `binary: true`, and `vector_pq` (`FIXED_LEN_BYTE_ARRAY(pqSegments)`) when `pq: true`.
+Core columns: `id` (STRING), `vector` (`FIXED_LEN_BYTE_ARRAY(4 × dim)`, raw float32 bytes, `UNCOMPRESSED`), and an optional ANN column: `vector_bin` (`FIXED_LEN_BYTE_ARRAY(dim/8)`, 1 bit per dim) when `binary: true`.
 
-**Exact search path** (no binary column, or `rerankFactor: 0`): single pass over the float32 column via `parquetRead({ onChunk })`. Each row-group's decoded `Uint8Array[]` shares a backing buffer, so we view it as one aligned `Float32Array` and stride by `dim` — zero per-row allocations.
+**Exact search path** (no binary column, or `rerankFactor: 0`): single pass over the float32 column via `parquetRead({ onChunk })`. Each row-group's decoded `Uint8Array[]` shares a backing buffer, so we view it as one aligned `Float32Array` and stride by `dim`, with zero per-row allocations.
 
-**Binary + cluster + rerank path** (default when `binary: true` and no PQ column is present):
+**Binary + cluster + rerank path** (default when `binary: true`):
 
-1. **Build-time clustering** (when `clusters > 0`): k-means on the 1-bit codes using Hamming distance and bit-majority voting. Cluster ids are then renumbered via a greedy nearest-neighbor walk so that adjacent ids = similar centroids — this makes the top-N nearest clusters at query time tend to land in fewer contiguous row ranges. Rows are sorted by the new cluster id. Centroids and per-cluster row counts go into KV metadata.
-2. **Phase 1 — cluster pruning**: rank clusters by Hamming(query, centroid), pick the top `probe` fraction, and Hamming-scan only those clusters' row ranges. With 32 KB pages and `useOffsetIndex`, hyparquet fetches only the pages covering each cluster's rows.
-3. **Phase 2 — float32 rerank**: collect the top `topK × rerankFactor` candidate row indices, coalesce them into contiguous runs (merging gaps ≤ 64 rows), and issue one ranged `parquetRead` per run for the `vector` column only. Score under the exact metric.
-4. **Phase 3 — id lookup**: fetch the `id` column for *only* the top-K winners (the id column is variable-length and reading it for every candidate doubles phase-2 cost).
+1. **Build-time clustering** (when `clusters > 0`): k-means on the 1-bit codes using Hamming distance and bit-majority voting. Cluster ids are then renumbered via a greedy nearest-neighbor walk so that adjacent ids = similar centroids. This makes the top-N nearest clusters at query time tend to land in fewer contiguous row ranges. Rows are sorted by the new cluster id. Centroids and per-cluster row counts go into KV metadata.
+2. **Phase 1, cluster pruning**: rank clusters by Hamming(query, centroid), pick the top `probe` fraction, and Hamming-scan only those clusters' row ranges. With 32 KB pages and `useOffsetIndex`, hyparquet fetches only the pages covering each cluster's rows.
+3. **Phase 2, float32 rerank**: collect the top `topK × rerankFactor` candidate row indices, coalesce them into contiguous runs (merging gaps ≤ 64 rows), and issue one ranged `parquetRead` per run for the `vector` column only. Score under the exact metric.
+4. **Phase 3, id lookup**: fetch the `id` column for *only* the top-K winners (the id column is variable-length and reading it for every candidate doubles phase-2 cost).
 
 A `cachedAsyncBuffer` deduplicates footer / offset-index byte ranges across all the parallel `parquetRead` calls.
-
-**IVF-PQ + rerank path** (`algorithm: 'pq'`, or `auto` when a file has PQ but no binary column): rank stored float IVF centroids against the query, scan compact residual `vector_pq` codes over the selected IVF row groups, approximate-score candidates with lookup tables built from the query, IVF centroid, and residual PQ codebooks, then fetch full float32 vectors only for the candidate pool and exact-rerank as above. IVF-PQ uses its own row ordering and should not be combined with binary `clusters`.
 
 For pre-normalized vectors with `metric: 'cosine'`, the search normalizes the query once and scores via dot product to skip the per-candidate sqrt loop.
 
@@ -187,7 +185,6 @@ For pre-normalized vectors with `metric: 'cosine'`, the search normalizes the qu
 | `id` | `STRING` (UTF8) | variable | always |
 | `vector` | `FIXED_LEN_BYTE_ARRAY(4 × dim)` | `4 × dim` | always |
 | `vector_bin` | `FIXED_LEN_BYTE_ARRAY(dim/8)` | `dim/8` | when `binary: true` |
-| `vector_pq` | `FIXED_LEN_BYTE_ARRAY(pqSegments)` | `pqSegments` | when `pq: true` |
 
 Key-value metadata:
 
@@ -198,17 +195,10 @@ Key-value metadata:
 | `hypvector.metric` | `cosine` \| `dot` \| `euclidean` |
 | `hypvector.normalized` | `true` if vectors were L2-normalized on write |
 | `hypvector.binary` | `true` if the `vector_bin` column is present |
-| `hypvector.pq` | `true` if the `vector_pq` column is present |
 | `hypvector.count` | number of vectors |
 | `hypvector.clusters` | number of k-means clusters (0 if not clustered) |
 | `hypvector.centroids` | base64-encoded centroid binary codes (`clusters × dim/8` bytes); present when `clusters > 0` |
 | `hypvector.clusterCounts` | base64-encoded `Uint32Array` of per-cluster row counts; present when `clusters > 0` |
-| `hypvector.pq.segments` | number of PQ sub-vectors / bytes per code; present when `pq: true` |
-| `hypvector.pq.centroids` | centroids per PQ sub-vector; present when `pq: true` |
-| `hypvector.pq.codebooks` | base64-encoded residual `Float32Array` codebooks (`pq.centroids × dim` floats); present when `pq: true` |
-| `hypvector.ivf.clusters` | number of non-empty IVF lists; present when `pq: true` |
-| `hypvector.ivf.centroids` | base64-encoded float IVF centroids (`ivf.clusters × dim` float32 values); present when `pq: true` |
-| `hypvector.ivf.counts` | base64-encoded `Uint32Array` of per-IVF-list row counts; present when `pq: true` |
 
 ### CLI
 
@@ -229,7 +219,7 @@ The default `rerankFactor` of 10 is tuned for the hundreds-of-thousands range. A
 | 100 | 1,000 | 155 | 68% |
 | 300 | 3,000 | 443 | 98% |
 
-Rough rule: `rerankFactor ≈ max(10, N / 3000)`. At 1M that's ~333, giving ~98% recall at ~440 ms — still about an order of magnitude faster than the 950 ms exact scan.
+Rough rule: `rerankFactor ≈ max(10, N / 3000)`. At 1M that's ~333, giving ~98% recall at ~440 ms, still about an order of magnitude faster than the 950 ms exact scan.
 
 ## Performance
 
@@ -239,7 +229,7 @@ From `scripts/ablation.js` (write-side optimizations):
 
 | Variant | File MB | Query ms | Fetches | MB read | Recall@10 |
 |---|---:|---:|---:|---:|---:|
-| base (`vector` + `id`) — forced exact scan | 241.5 | 108 | 33 | 242.0 | 100% |
+| base (`vector` + `id`), forced exact scan | 241.5 | 108 | 33 | 242.0 | 100% |
 | `+ binary` (phase 1 + 2 rerank) | 249.3 | 48 | 136 | 11.7 | 93% |
 | `+ cluster` (default; `probe=0.25`, `clusters=128`) | 249.4 | 15 | 162 | 6.2 | 91% |
 
@@ -276,8 +266,8 @@ hypvector isn't a hosted service. The closest peers are:
 
 | Engine | Server? | Cold p50 | Warm p50 | Fixed $/mo |
 |---|---|---:|---:|---:|
-| **hypvector** | none — file on S3 | ~500 ms (CloudFront, home WAN) | same — no cache | $0 |
-| **LanceDB** (S3 mode) | none — embedded | bandwidth-bound | sub-50 ms (local) | $0 |
+| **hypvector** | none, file on S3 | ~500 ms (CloudFront, home WAN) | same, no cache | $0 |
+| **LanceDB** (S3 mode) | none, embedded | bandwidth-bound | sub-50 ms (local) | $0 |
 | **turbopuffer** | hosted | ~440 ms p90 | ~8 ms | $64 min |
 | **Pinecone Serverless** | hosted | 200 ms – 2 s | 50–100 ms | $0 + per-RU |
 | **Cloudflare Vectorize** | hosted (edge) | needs pre-warm | edge-fast | $0 + per-op |
@@ -286,10 +276,10 @@ Use hypvector for static datasets, browser-side search, or low-QPS where a hoste
 
 ## References
 
- - [hyparquet](https://github.com/hyparam/hyparquet) — Parquet reading
- - [hyparquet-writer](https://github.com/hyparam/hyparquet-writer) — Parquet writing
- - [hyparquet-compressors](https://github.com/hyparam/hyparquet-compressors) — Compression codecs
- - [Apache Parquet](https://parquet.apache.org) — Columnar storage format
+ - [hyparquet](https://github.com/hyparam/hyparquet): Parquet reading
+ - [hyparquet-writer](https://github.com/hyparam/hyparquet-writer): Parquet writing
+ - [hyparquet-compressors](https://github.com/hyparam/hyparquet-compressors): Compression codecs
+ - [Apache Parquet](https://parquet.apache.org): Columnar storage format
 
 ## Contributions
 

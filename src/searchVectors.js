@@ -1,7 +1,6 @@
 import { parquetMetadataAsync } from 'hyparquet'
 import { defaultAsyncBufferFactory } from './asyncBufferFactory.js'
 import { searchExact } from './search/exact.js'
-import { searchPq } from './search/pq.js'
 import { searchRerank } from './search/rerank.js'
 import { l2Normalize, parseKvMetadata } from './utils.js'
 
@@ -25,8 +24,6 @@ import { l2Normalize, parseKvMetadata } from './utils.js'
  *     phase 2 fetches the candidate float32 vectors and reranks.
  *   - Binary + rerank (binary column present, no clustering): full Hamming
  *     scan in phase 1, then per-candidate float32 fetch + rerank in phase 2.
- *   - PQ + rerank (PQ column present, no binary column): scan compact PQ
- *     codes in phase 1, then per-candidate float32 fetch + rerank in phase 2.
  *   - Exact (no binary column, or rerankFactor=0): single pass over the
  *     float32 column, scoring every row.
  *
@@ -145,11 +142,6 @@ async function searchOne({
     results = await searchExact({
       file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, compressors,
     })
-  } else if (algorithm === 'pq') {
-    if (!meta.hasPq) throw new Error('searchVectors: algorithm `pq` requested, but file has no PQ column')
-    results = await searchPq({
-      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe, compressors,
-    })
   } else if (algorithm === 'binary') {
     if (!meta.hasBinary) throw new Error('searchVectors: algorithm `binary` requested, but file has no binary column')
     results = await searchRerank({
@@ -160,10 +152,6 @@ async function searchOne({
   } else if (meta.hasBinary) {
     results = await searchRerank({
       file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe, binary, compressors,
-    })
-  } else if (meta.hasPq) {
-    results = await searchPq({
-      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe, compressors,
     })
   } else {
     results = await searchExact({

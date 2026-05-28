@@ -13,9 +13,6 @@ export const defaultVectorColumn = 'vector'
 // Default name of the binary (sign-bit) rerank column
 export const defaultBinaryColumn = 'vector_bin'
 
-// Default name of the product-quantized vector code column
-export const defaultPqColumn = 'vector_pq'
-
 // Default name of the id column
 export const defaultIdColumn = 'id'
 
@@ -32,18 +29,6 @@ export const defaultClusterIterations = 6
 // Default fraction of clusters scanned in phase 1 at query time when the
 // file has cluster metadata. Lower = faster but lower recall.
 export const defaultClusterProbeFraction = 0.25
-
-// Default residual product quantization settings. The IVF-PQ path stores
-// one code byte per segment, with values in [0, defaultPqCentroids).
-export const defaultPqSegments = 32
-export const defaultPqCentroids = 64
-export const defaultPqIterations = 8
-export const defaultPqSampleSize = 4096
-
-// Default IVF coarse quantizer settings for the IVF-PQ path.
-export const defaultIvfClusters = 128
-export const defaultIvfIterations = 6
-export const defaultIvfSampleSize = 4096
 
 // When `binary` is not specified at write time, the column is added once
 // the corpus is at least this large. Below the threshold, exact full scan

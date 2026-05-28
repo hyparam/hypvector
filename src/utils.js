@@ -148,14 +148,13 @@ export function parseKvMetadata(metadata) {
   const metric = /** @type {DistanceMetric} */ (kv['hypvector.metric'] ?? 'cosine')
   const normalized = kv['hypvector.normalized'] === 'true'
   const hasBinary = kv['hypvector.binary'] === 'true'
-  const hasPq = kv['hypvector.pq'] === 'true'
   const count = Number(metadata.num_rows)
   const clusters = parseInt(kv['hypvector.clusters'] ?? '0', 10)
   if (!dimension) {
     throw new Error('Not a hypvector parquet file: missing hypvector.dimension metadata')
   }
   /** @type {HypVectorMetadata} */
-  const out = { version, dimension, metric, normalized, hasBinary, hasPq, count, clusters }
+  const out = { version, dimension, metric, normalized, hasBinary, count, clusters }
   if (clusters > 0 && kv['hypvector.centroids']) {
     const binaryBytes = dimension + 7 >> 3
     const bytes = decodeBase64(kv['hypvector.centroids'])
@@ -173,49 +172,6 @@ export function parseKvMetadata(metadata) {
     const aligned = new Uint8Array(bytes.byteLength)
     aligned.set(bytes)
     out.clusterCounts = new Uint32Array(aligned.buffer, 0, clusters)
-  }
-  if (hasPq) {
-    const pqSegments = parseInt(kv['hypvector.pq.segments'] ?? '0', 10)
-    const pqCentroids = parseInt(kv['hypvector.pq.centroids'] ?? '0', 10)
-    if (!pqSegments || !pqCentroids) {
-      throw new Error('PQ metadata is missing segment or centroid count')
-    }
-    out.pqSegments = pqSegments
-    out.pqCentroids = pqCentroids
-    if (kv['hypvector.pq.codebooks']) {
-      const bytes = decodeBase64(kv['hypvector.pq.codebooks'])
-      const expectedBytes = pqCentroids * dimension * 4
-      if (bytes.byteLength !== expectedBytes) {
-        throw new Error(`PQ codebooks length mismatch: ${bytes.byteLength} vs ${expectedBytes}`)
-      }
-      const aligned = new Uint8Array(bytes.byteLength)
-      aligned.set(bytes)
-      out.pqCodebooks = new Float32Array(aligned.buffer, 0, pqCentroids * dimension)
-    }
-    const ivfClusters = parseInt(kv['hypvector.ivf.clusters'] ?? '0', 10)
-    if (ivfClusters > 0) {
-      out.ivfClusters = ivfClusters
-      if (kv['hypvector.ivf.centroids']) {
-        const bytes = decodeBase64(kv['hypvector.ivf.centroids'])
-        const expectedBytes = ivfClusters * dimension * 4
-        if (bytes.byteLength !== expectedBytes) {
-          throw new Error(`IVF centroids length mismatch: ${bytes.byteLength} vs ${expectedBytes}`)
-        }
-        const aligned = new Uint8Array(bytes.byteLength)
-        aligned.set(bytes)
-        out.ivfCentroids = new Float32Array(aligned.buffer, 0, ivfClusters * dimension)
-      }
-      if (kv['hypvector.ivf.counts']) {
-        const bytes = decodeBase64(kv['hypvector.ivf.counts'])
-        const expectedBytes = ivfClusters * 4
-        if (bytes.byteLength !== expectedBytes) {
-          throw new Error(`IVF counts length mismatch: ${bytes.byteLength} vs ${expectedBytes}`)
-        }
-        const aligned = new Uint8Array(bytes.byteLength)
-        aligned.set(bytes)
-        out.ivfCounts = new Uint32Array(aligned.buffer, 0, ivfClusters)
-      }
-    }
   }
   return out
 }

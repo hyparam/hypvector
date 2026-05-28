@@ -187,39 +187,4 @@ describe('searchVectors', () => {
     expect(exact[0].id).toBe(rerank[0].id)
     expect(exact[0].score).toBeCloseTo(rerank[0].score, 4)
   })
-
-  it('uses PQ approximate scoring with exact rerank', async () => {
-    const dimension = 32
-    const vectors = makeVectors(240, dimension, 31)
-    const writer = fileWriter(TEST_FILE)
-    await writeVectors({
-      writer,
-      vectors,
-      dimension,
-      normalize: true,
-      pq: true,
-      pqSegments: 8,
-      pqCentroids: 8,
-      pqIterations: 3,
-      pqSampleSize: 80,
-    })
-
-    const file = await asyncBufferFromFile(TEST_FILE)
-    const metadata = await parquetMetadataAsync(file)
-    const meta = parseKvMetadata(metadata)
-    expect(meta.hasPq).toBe(true)
-
-    const target = vectors[123]
-    const results = await searchVectors({
-      source: file,
-      metadata,
-      query: target.vector,
-      topK: 5,
-      rerankFactor: 40,
-    })
-
-    expect(results.length).toBe(5)
-    expect(results[0].id).toBe(target.id)
-    expect(results[0].score).toBeCloseTo(1, 4)
-  })
 })
