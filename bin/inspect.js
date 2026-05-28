@@ -22,6 +22,12 @@ export async function inspect({ path }) {
   console.log(`Metric: ${meta.metric}`)
   console.log(`Normalized: ${meta.normalized}`)
   console.log(`Binary column: ${meta.hasBinary}`)
+  console.log(`PQ column: ${meta.hasPq}`)
+  if (meta.hasPq) {
+    console.log(`PQ segments: ${meta.pqSegments}`)
+    console.log(`PQ centroids: ${meta.pqCentroids}`)
+    console.log(`IVF clusters: ${meta.ivfClusters}`)
+  }
   console.log(`Row groups: ${metadata.row_groups.length.toLocaleString()}`)
   console.log(`Raw float32 size: ${rawSize.toLocaleString()} bytes`)
   console.log(`Overhead: ${(ratio * 100).toFixed(1)}% of raw`)

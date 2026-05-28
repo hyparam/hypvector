@@ -5,11 +5,20 @@ import {
   defaultBinaryPageSize,
   defaultClusterIterations,
   defaultIdColumn,
+  defaultIvfClusters,
+  defaultIvfIterations,
+  defaultIvfSampleSize,
+  defaultPqCentroids,
+  defaultPqColumn,
+  defaultPqIterations,
+  defaultPqSampleSize,
+  defaultPqSegments,
   defaultRowGroupSize,
   defaultVectorColumn,
   hypVectorVersion,
 } from './constants.js'
-import { l2Normalize, packBinary, packFloat32 } from './utils.js'
+import { buildIvfPq } from './pq.js'
+import { encodeBase64, l2Normalize, packBinary, packFloat32 } from './utils.js'
 
 /**
  * @import { WriteVectorsOptions } from './types.js'
@@ -24,10 +33,11 @@ import { l2Normalize, packBinary, packFloat32 } from './utils.js'
  *   - `id`: STRING (caller-supplied id, coerced to string)
  *   - `vector`: FIXED_LEN_BYTE_ARRAY(4 * dimension) raw little-endian float32 bytes
  *   - `vector_bin`: FIXED_LEN_BYTE_ARRAY(dim/8) — written when `binary: true`
+ *   - `vector_pq`: FIXED_LEN_BYTE_ARRAY(pqSegments) — written when `pq: true`
  *
- * When `clusters > 0`, rows are reordered by cluster id and the centroids
- * plus per-cluster row counts are written to KV metadata; no cluster_id
- * column is materialized.
+ * When `clusters > 0`, rows are reordered by binary cluster id. When
+ * `pq: true`, rows are reordered by IVF list id. These layouts are mutually
+ * exclusive because both define contiguous row ranges for search.
  *
  * @param {WriteVectorsOptions} options
  * @returns {Promise<void>}
@@ -45,6 +55,15 @@ export async function writeVectors({
   clusters = 0,
   clusterIterations = defaultClusterIterations,
   clusterSeed = 1,
+  pq = false,
+  pqSegments = defaultPqSegments,
+  pqCentroids = defaultPqCentroids,
+  pqIterations = defaultPqIterations,
+  pqSampleSize = defaultPqSampleSize,
+  pqSeed = 1,
+  ivfClusters = defaultIvfClusters,
+  ivfIterations = defaultIvfIterations,
+  ivfSampleSize = defaultIvfSampleSize,
 }) {
   if (!Number.isInteger(dimension) || dimension <= 0) {
     throw new Error(`invalid dimension: ${dimension}`)
@@ -53,8 +72,11 @@ export async function writeVectors({
     // Clustering operates on binary codes; require the binary column too.
     binary = true
   }
+  if (pq && clusters > 0) {
+    throw new Error('writeVectors: `pq` uses IVF row ordering; do not combine it with binary `clusters`')
+  }
 
-  const effectivePageSize = pageSize ?? (binary ? defaultBinaryPageSize : undefined)
+  const effectivePageSize = pageSize ?? (binary || pq ? defaultBinaryPageSize : undefined)
   const binaryBytes = dimension + 7 >> 3
 
   /** @type {string[]} */
@@ -63,16 +85,80 @@ export async function writeVectors({
   const packed = []
   /** @type {Uint8Array[] | null} */
   const packedBin = binary ? [] : null
+  /** @type {Float32Array[] | null} */
+  const vectorsForPq = pq ? [] : null
 
   for await (const record of vectors) {
     const { id, vector } = record
     if (!vector || vector.length !== dimension) {
       throw new Error(`vector for id=${id} has length ${vector?.length}, expected ${dimension}`)
     }
-    const v = normalize ? l2Normalize(vector) : vector
+    const v = normalize
+      ? l2Normalize(vector)
+      : vector instanceof Float32Array ? vector : Float32Array.from(vector)
     ids.push(String(id))
     packed.push(packFloat32(v))
     if (packedBin) packedBin.push(packBinary(v, dimension))
+    if (vectorsForPq) vectorsForPq.push(v)
+  }
+
+  /** @type {Uint8Array[] | null} */
+  let packedPq = null
+  /** @type {Float32Array | null} */
+  let pqCodebooks = null
+  /** @type {Float32Array | null} */
+  let ivfCentroids = null
+  /** @type {Uint32Array | null} */
+  let ivfCounts = null
+  /** @type {Int32Array | null} */
+  let ivfAssignments = null
+  let pqSegmentsOut = 0
+  let pqCentroidsOut = 0
+  let ivfClustersOut = 0
+  if (vectorsForPq) {
+    const built = buildIvfPq({
+      vectors: vectorsForPq,
+      dimension,
+      ivfClusters,
+      ivfIterations,
+      ivfSampleSize,
+      pqSegments,
+      pqCentroids,
+      pqIterations,
+      pqSampleSize,
+      seed: pqSeed,
+    })
+    packedPq = built.codes
+    pqCodebooks = built.codebooks
+    ivfCentroids = built.ivfCentroids
+    ivfCounts = built.ivfCounts
+    ivfAssignments = built.assignments
+    pqSegmentsOut = built.pqSegments
+    pqCentroidsOut = built.pqCentroids
+    ivfClustersOut = built.ivfClusters
+  }
+
+  if (packedPq && ivfAssignments) {
+    const order = new Int32Array(ids.length)
+    for (let i = 0; i < ids.length; i += 1) order[i] = i
+    const sorted = Array.from(order).sort((a, b) => ivfAssignments[a] - ivfAssignments[b])
+    const idsOut = new Array(ids.length)
+    const packedOut = new Array(ids.length)
+    const packedBinOut = packedBin ? new Array(ids.length) : null
+    const packedPqOut = new Array(ids.length)
+    for (let i = 0; i < sorted.length; i += 1) {
+      const src = sorted[i]
+      idsOut[i] = ids[src]
+      packedOut[i] = packed[src]
+      if (packedBinOut && packedBin) packedBinOut[i] = packedBin[src]
+      packedPqOut[i] = packedPq[src]
+    }
+    for (let i = 0; i < ids.length; i += 1) {
+      ids[i] = idsOut[i]
+      packed[i] = packedOut[i]
+      if (packedBinOut && packedBin) packedBin[i] = packedBinOut[i]
+      packedPq[i] = packedPqOut[i]
+    }
   }
 
   /** @type {Uint8Array[] | null} */
@@ -98,12 +184,14 @@ export async function writeVectors({
     const idsOut = new Array(ids.length)
     const packedOut = new Array(ids.length)
     const packedBinOut = new Array(ids.length)
+    const packedPqOut = packedPq ? new Array(ids.length) : null
     clusterCounts = new Uint32Array(cs.length)
     for (let i = 0; i < sorted.length; i += 1) {
       const src = sorted[i]
       idsOut[i] = ids[src]
       packedOut[i] = packed[src]
       packedBinOut[i] = packedBin[src]
+      if (packedPqOut && packedPq) packedPqOut[i] = packedPq[src]
       clusterCounts[remap[assignments[src]]] += 1
     }
     // In-place swap (push(...arr) blows the call stack at ~100k elements).
@@ -111,6 +199,7 @@ export async function writeVectors({
       ids[i] = idsOut[i]
       packed[i] = packedOut[i]
       packedBin[i] = packedBinOut[i]
+      if (packedPqOut && packedPq) packedPq[i] = packedPqOut[i]
     }
   }
 
@@ -120,6 +209,7 @@ export async function writeVectors({
     { key: 'hypvector.metric', value: metric },
     { key: 'hypvector.normalized', value: String(normalize) },
     { key: 'hypvector.binary', value: String(binary) },
+    { key: 'hypvector.pq', value: String(Boolean(packedPq)) },
     { key: 'hypvector.count', value: String(ids.length) },
     { key: 'hypvector.clusters', value: String(centroids ? centroids.length : 0) },
   ]
@@ -134,6 +224,26 @@ export async function writeVectors({
       key: 'hypvector.clusterCounts',
       value: encodeBase64(new Uint8Array(clusterCounts.buffer, clusterCounts.byteOffset, clusterCounts.byteLength)),
     })
+  }
+  if (packedPq && pqCodebooks) {
+    kvMetadata.push({ key: 'hypvector.pq.mode', value: 'ivf' })
+    kvMetadata.push({ key: 'hypvector.pq.segments', value: String(pqSegmentsOut) })
+    kvMetadata.push({ key: 'hypvector.pq.centroids', value: String(pqCentroidsOut) })
+    kvMetadata.push({
+      key: 'hypvector.pq.codebooks',
+      value: encodeBase64(new Uint8Array(pqCodebooks.buffer, pqCodebooks.byteOffset, pqCodebooks.byteLength)),
+    })
+    if (ivfCentroids && ivfCounts) {
+      kvMetadata.push({ key: 'hypvector.ivf.clusters', value: String(ivfClustersOut) })
+      kvMetadata.push({
+        key: 'hypvector.ivf.centroids',
+        value: encodeBase64(new Uint8Array(ivfCentroids.buffer, ivfCentroids.byteOffset, ivfCentroids.byteLength)),
+      })
+      kvMetadata.push({
+        key: 'hypvector.ivf.counts',
+        value: encodeBase64(new Uint8Array(ivfCounts.buffer, ivfCounts.byteOffset, ivfCounts.byteLength)),
+      })
+    }
   }
 
   /** @type {ColumnSource[]} */
@@ -159,6 +269,15 @@ export async function writeVectors({
       repetition_type: 'REQUIRED',
     }
   }
+  if (packedPq) {
+    columnData.push({ name: defaultPqColumn, data: packedPq })
+    schemaOverrides[defaultPqColumn] = {
+      name: defaultPqColumn,
+      type: 'FIXED_LEN_BYTE_ARRAY',
+      type_length: pqSegmentsOut,
+      repetition_type: 'REQUIRED',
+    }
+  }
   const schemaInput = columnData.map(c => c.name === defaultIdColumn ? { ...c, type: /** @type {const} */ ('STRING') } : c)
   const schema = schemaFromColumnData({ columnData: schemaInput, schemaOverrides })
 
@@ -167,7 +286,7 @@ export async function writeVectors({
   // chunk per cluster — drops fetches roughly proportional to clusters
   // probed. Caller-supplied rowGroupSize wins if explicitly passed.
   const effectiveRowGroupSize = rowGroupSize ?? (
-    clusterCounts ? Array.from(clusterCounts) : defaultRowGroupSize
+    ivfCounts ? Array.from(ivfCounts) : clusterCounts ? Array.from(clusterCounts) : defaultRowGroupSize
   )
 
   await parquetWrite({
@@ -179,18 +298,4 @@ export async function writeVectors({
     codec,
     ...effectivePageSize !== undefined ? { pageSize: effectivePageSize } : {},
   })
-}
-
-/**
- * Base64 encode a Uint8Array. Uses Node's Buffer when available, falls back
- * to btoa for browser environments.
- *
- * @param {Uint8Array} bytes
- * @returns {string}
- */
-function encodeBase64(bytes) {
-  if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64')
-  let s = ''
-  for (let i = 0; i < bytes.length; i += 1) s += String.fromCharCode(bytes[i])
-  return btoa(s)
 }

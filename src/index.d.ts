@@ -12,6 +12,7 @@ export type {
   HypVectorMetadata,
   PrefetchBinaryOptions,
   ReadVectorsOptions,
+  SearchAlgorithm,
   SearchResult,
   SearchVectorsOptions,
   VectorRecord,

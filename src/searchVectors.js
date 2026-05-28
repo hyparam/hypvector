@@ -1,6 +1,7 @@
 import { parquetMetadataAsync } from 'hyparquet'
 import { defaultAsyncBufferFactory } from './asyncBufferFactory.js'
 import { searchExact } from './search/exact.js'
+import { searchPq } from './search/pq.js'
 import { searchRerank } from './search/rerank.js'
 import { l2Normalize, parseKvMetadata } from './utils.js'
 
@@ -18,12 +19,14 @@ import { l2Normalize, parseKvMetadata } from './utils.js'
  * `prefetchBinary`) may be passed as same-length arrays; pass `undefined`
  * in any slot to fall back to the default behavior for that source.
  *
- * Three paths are picked per source, in order of preference:
+ * With `algorithm: 'auto'`, paths are picked per source in this order:
  *   - Clustered + binary + rerank (file has centroids): phase 1 scans only
  *     the top-N nearest clusters' row ranges (skipping whole row groups),
  *     phase 2 fetches the candidate float32 vectors and reranks.
  *   - Binary + rerank (binary column present, no clustering): full Hamming
  *     scan in phase 1, then per-candidate float32 fetch + rerank in phase 2.
+ *   - PQ + rerank (PQ column present, no binary column): scan compact PQ
+ *     codes in phase 1, then per-candidate float32 fetch + rerank in phase 2.
  *   - Exact (no binary column, or rerankFactor=0): single pass over the
  *     float32 column, scoring every row.
  *
@@ -39,6 +42,7 @@ export async function searchVectors({
   rerankFactor = 10,
   probe,
   binary,
+  algorithm = 'auto',
   signal,
   asyncBufferFactory,
   compressors,
@@ -70,6 +74,7 @@ export async function searchVectors({
     rerankFactor,
     probe,
     signal,
+    algorithm,
     asyncBufferFactory,
     compressors,
     sourceIndex: multi ? i : undefined,
@@ -105,6 +110,7 @@ export async function searchVectors({
  * @param {import('./types.js').DistanceMetric} [opts.metric]
  * @param {number} opts.rerankFactor
  * @param {number} [opts.probe]
+ * @param {import('./types.js').SearchAlgorithm} opts.algorithm
  * @param {AbortSignal} [opts.signal]
  * @param {(options: { source: string, signal?: AbortSignal }) => Promise<AsyncBuffer>} [opts.asyncBufferFactory]
  * @param {import('hyparquet').Compressors} [opts.compressors]
@@ -112,7 +118,7 @@ export async function searchVectors({
  * @returns {Promise<{ results: SearchResult[], direction: 1 | -1 }>}
  */
 async function searchOne({
-  query, source, metadata: providedMetadata, binary, topK, metric, rerankFactor, probe, signal, asyncBufferFactory, compressors, sourceIndex,
+  query, source, metadata: providedMetadata, binary, topK, metric, rerankFactor, probe, algorithm, signal, asyncBufferFactory, compressors, sourceIndex,
 }) {
   const file = typeof source === 'string'
     ? await (asyncBufferFactory ?? defaultAsyncBufferFactory)({ source, signal })
@@ -133,13 +139,37 @@ async function searchOne({
     scoringMetric = 'dot'
   }
 
-  const results = meta.hasBinary && rerankFactor > 0
-    ? await searchRerank({
-      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe, binary, compressors,
-    })
-    : await searchExact({
+  /** @type {SearchResult[]} */
+  let results
+  if (algorithm === 'exact' || rerankFactor === 0) {
+    results = await searchExact({
       file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, compressors,
     })
+  } else if (algorithm === 'pq') {
+    if (!meta.hasPq) throw new Error('searchVectors: algorithm `pq` requested, but file has no PQ column')
+    results = await searchPq({
+      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe, compressors,
+    })
+  } else if (algorithm === 'binary') {
+    if (!meta.hasBinary) throw new Error('searchVectors: algorithm `binary` requested, but file has no binary column')
+    results = await searchRerank({
+      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe, binary, compressors,
+    })
+  } else if (algorithm !== 'auto') {
+    throw new Error(`searchVectors: unsupported algorithm ${algorithm}`)
+  } else if (meta.hasBinary) {
+    results = await searchRerank({
+      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe, binary, compressors,
+    })
+  } else if (meta.hasPq) {
+    results = await searchPq({
+      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, rerankFactor, probe, compressors,
+    })
+  } else {
+    results = await searchExact({
+      file, metadata, meta, queryF32, scoringMetric, reportedMetric: requestedMetric, topK, compressors,
+    })
+  }
 
   if (sourceIndex !== undefined) {
     for (const r of results) r.sourceIndex = sourceIndex

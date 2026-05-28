@@ -2,6 +2,7 @@ import { existsSync, unlinkSync } from 'node:fs'
 import { asyncBufferFromFile, parquetMetadataAsync } from 'hyparquet'
 import { fileWriter } from 'hyparquet-writer'
 import { afterEach, describe, expect, it } from 'vitest'
+import { parseKvMetadata } from '../src/utils.js'
 import { writeVectors } from '../src/writeVectors.js'
 import { makeVectors } from './helpers.js'
 
@@ -67,5 +68,35 @@ describe('writeVectors', () => {
       return meta.key_value_metadata?.find(e => e.key === key)?.value
     }
     expect(find('hypvector.normalized')).toBe('true')
+  })
+
+  it('writes PQ metadata and code column when requested', async () => {
+    const dimension = 16
+    const vectors = makeVectors(80, dimension, 9)
+    const writer = fileWriter(TEST_FILE)
+
+    await writeVectors({
+      writer,
+      dimension,
+      vectors,
+      pq: true,
+      pqSegments: 8,
+      pqCentroids: 4,
+      pqIterations: 2,
+      pqSampleSize: 32,
+    })
+
+    const file = await asyncBufferFromFile(TEST_FILE)
+    const metadata = await parquetMetadataAsync(file)
+    const meta = parseKvMetadata(metadata)
+    expect(meta.hasPq).toBe(true)
+    expect(meta.pqSegments).toBe(8)
+    expect(meta.pqCentroids).toBe(4)
+    expect(meta.pqMode).toBe('ivf')
+    expect(meta.pqCodebooks?.length).toBe(4 * dimension)
+    expect(meta.ivfClusters).toBeGreaterThan(0)
+    expect(meta.ivfCentroids?.length).toBe((meta.ivfClusters ?? 0) * dimension)
+    expect(meta.ivfCounts?.length).toBe(meta.ivfClusters)
+    expect(metadata.schema.some(s => s.name === 'vector_pq')).toBe(true)
   })
 })

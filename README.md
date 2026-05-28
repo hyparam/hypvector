@@ -66,6 +66,7 @@ await writeVectors({
   normalize: true,    // L2-normalize on write; lets search skip sqrt for cosine
   binary: true,       // also write 1-bit-per-dim sign column for binary+rerank search
   clusters: 128,      // k-means clusters for phase-1 pruning (implies binary: true)
+  pq: true,           // optional IVF-PQ index for approximate scoring before rerank
   vectors: myEmbedder(), // any sync or async iterable of { id, vector }
 })
 ```
@@ -155,6 +156,7 @@ const results = await searchVectors({
   source: 'https://example.com/vectors.parquet', // URL, local file path, or an open AsyncBuffer
   query: queryVec,    // Float32Array of length `dimension`
   topK: 10,
+  algorithm: 'auto', // 'auto' | 'exact' | 'binary' | 'pq'
   rerankFactor: 10,   // candidate pool = topK * rerankFactor (default 10). Set to 0 to force exact full scan.
   probe: 0.25,        // fraction of clusters to scan in phase 1 (default 0.25). Set to 1 to scan all clusters; pass an integer > 1 for an absolute count.
 })
@@ -166,11 +168,11 @@ const results = await searchVectors({
 
 ### How it works
 
-Three columns: `id` (STRING), `vector` (`FIXED_LEN_BYTE_ARRAY(4 × dim)`, raw float32 bytes, `UNCOMPRESSED`), and — when `binary: true` — `vector_bin` (`FIXED_LEN_BYTE_ARRAY(dim/8)`, 1 bit per dim).
+Core columns: `id` (STRING), `vector` (`FIXED_LEN_BYTE_ARRAY(4 × dim)`, raw float32 bytes, `UNCOMPRESSED`), and optional ANN columns: `vector_bin` (`FIXED_LEN_BYTE_ARRAY(dim/8)`, 1 bit per dim) when `binary: true`, and `vector_pq` (`FIXED_LEN_BYTE_ARRAY(pqSegments)`) when `pq: true`.
 
 **Exact search path** (no binary column, or `rerankFactor: 0`): single pass over the float32 column via `parquetRead({ onChunk })`. Each row-group's decoded `Uint8Array[]` shares a backing buffer, so we view it as one aligned `Float32Array` and stride by `dim` — zero per-row allocations.
 
-**Binary + cluster + rerank path** (default when `binary: true`):
+**Binary + cluster + rerank path** (default when `binary: true` and no PQ column is present):
 
 1. **Build-time clustering** (when `clusters > 0`): k-means on the 1-bit codes using Hamming distance and bit-majority voting. Cluster ids are then renumbered via a greedy nearest-neighbor walk so that adjacent ids = similar centroids — this makes the top-N nearest clusters at query time tend to land in fewer contiguous row ranges. Rows are sorted by the new cluster id. Centroids and per-cluster row counts go into KV metadata.
 2. **Phase 1 — cluster pruning**: rank clusters by Hamming(query, centroid), pick the top `probe` fraction, and Hamming-scan only those clusters' row ranges. With 32 KB pages and `useOffsetIndex`, hyparquet fetches only the pages covering each cluster's rows.
@@ -178,6 +180,8 @@ Three columns: `id` (STRING), `vector` (`FIXED_LEN_BYTE_ARRAY(4 × dim)`, raw fl
 4. **Phase 3 — id lookup**: fetch the `id` column for *only* the top-K winners (the id column is variable-length and reading it for every candidate doubles phase-2 cost).
 
 A `cachedAsyncBuffer` deduplicates footer / offset-index byte ranges across all the parallel `parquetRead` calls.
+
+**IVF-PQ + rerank path** (`algorithm: 'pq'`, or `auto` when a file has PQ but no binary column): rank stored float IVF centroids against the query, scan compact residual `vector_pq` codes over the selected IVF row groups, approximate-score candidates with lookup tables built from the query, IVF centroid, and residual PQ codebooks, then fetch full float32 vectors only for the candidate pool and exact-rerank as above. IVF-PQ uses its own row ordering and should not be combined with binary `clusters`.
 
 For pre-normalized vectors with `metric: 'cosine'`, the search normalizes the query once and scores via dot product to skip the per-candidate sqrt loop.
 
@@ -188,6 +192,7 @@ For pre-normalized vectors with `metric: 'cosine'`, the search normalizes the qu
 | `id` | `STRING` (UTF8) | variable | always |
 | `vector` | `FIXED_LEN_BYTE_ARRAY(4 × dim)` | `4 × dim` | always |
 | `vector_bin` | `FIXED_LEN_BYTE_ARRAY(dim/8)` | `dim/8` | when `binary: true` |
+| `vector_pq` | `FIXED_LEN_BYTE_ARRAY(pqSegments)` | `pqSegments` | when `pq: true` |
 
 Key-value metadata:
 
@@ -198,10 +203,18 @@ Key-value metadata:
 | `hypvector.metric` | `cosine` \| `dot` \| `euclidean` |
 | `hypvector.normalized` | `true` if vectors were L2-normalized on write |
 | `hypvector.binary` | `true` if the `vector_bin` column is present |
+| `hypvector.pq` | `true` if the `vector_pq` column is present |
 | `hypvector.count` | number of vectors |
 | `hypvector.clusters` | number of k-means clusters (0 if not clustered) |
 | `hypvector.centroids` | base64-encoded centroid binary codes (`clusters × dim/8` bytes); present when `clusters > 0` |
 | `hypvector.clusterCounts` | base64-encoded `Uint32Array` of per-cluster row counts; present when `clusters > 0` |
+| `hypvector.pq.mode` | `ivf`; present when `pq: true` |
+| `hypvector.pq.segments` | number of PQ sub-vectors / bytes per code; present when `pq: true` |
+| `hypvector.pq.centroids` | centroids per PQ sub-vector; present when `pq: true` |
+| `hypvector.pq.codebooks` | base64-encoded residual `Float32Array` codebooks (`pq.centroids × dim` floats); present when `pq: true` |
+| `hypvector.ivf.clusters` | number of non-empty IVF lists; present when `pq: true` |
+| `hypvector.ivf.centroids` | base64-encoded float IVF centroids (`ivf.clusters × dim` float32 values); present when `pq: true` |
+| `hypvector.ivf.counts` | base64-encoded `Uint32Array` of per-IVF-list row counts; present when `pq: true` |
 
 ### CLI
 
