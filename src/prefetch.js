@@ -46,10 +46,9 @@ export async function prefetchBinary({
     columns: [defaultBinaryColumn],
     onChunk: ({ columnName, columnData, rowStart }) => {
       if (columnName !== defaultBinaryColumn) return
-      const rows = /** @type {Uint8Array[]} */ (columnData)
       const baseByte = rowStart * bytesPerRow
-      for (let i = 0; i < rows.length; i += 1) {
-        buffer.set(rows[i], baseByte + i * bytesPerRow)
+      for (let i = 0; i < columnData.length; i += 1) {
+        buffer.set(columnData[i], baseByte + i * bytesPerRow)
       }
     },
   })

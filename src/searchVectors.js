@@ -60,8 +60,8 @@ export async function searchVectors({
   if (Array.isArray(binary) && binary.length !== sources.length) {
     throw new Error(`searchVectors: \`binary\` array length ${binary.length} does not match \`source\` array length ${sources.length}`)
   }
-  const metadatas = Array.isArray(metadata) ? metadata : sources.map(() => /** @type {FileMetaData | undefined} */ (metadata))
-  const binaries = Array.isArray(binary) ? binary : sources.map(() => /** @type {Uint8Array | undefined} */ (binary))
+  const metadatas = Array.isArray(metadata) ? metadata : sources.map(() => metadata)
+  const binaries = Array.isArray(binary) ? binary : sources.map(() => binary)
 
   const multi = sources.length > 1
   const perSource = await Promise.all(sources.map((src, i) => searchOne({
@@ -84,7 +84,7 @@ export async function searchVectors({
 
   // Merge: each per-source array is already sorted best-first under the same
   // direction (we assert below). Flatten, sort, slice — N is small.
-  const direction = perSource[0].direction
+  const { direction } = perSource[0]
   for (let i = 1; i < perSource.length; i += 1) {
     if (perSource[i].direction !== direction) {
       throw new Error('searchVectors: sources have inconsistent metric directions')

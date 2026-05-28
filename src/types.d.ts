@@ -18,9 +18,9 @@ export interface WriteVectorsOptions {
   metric?: DistanceMetric // hint stored in kv metadata (default: 'cosine')
   normalize?: boolean // l2-normalize vectors on write (default: false)
   codec?: CompressionCodec // parquet codec (default: 'UNCOMPRESSED'; SNAPPY rarely shrinks float embeddings and costs ~2-3x query latency. ZSTD on write isn't supported here — hyparquet-compressors only ships decompressors.)
-  binary?: boolean // also write a 1-bit-per-dim sign-bit column for binary+rerank search (default: false; adds ~1.5% file size at 384-dim)
+  binary?: boolean // also write a 1-bit-per-dim sign-bit column for binary+rerank search (default: auto — on when N ≥ 10000; adds ~1.5% file size at 384-dim). Pass `false` to force-disable.
   pageSize?: number // target page size in bytes (default: 1 MB). Smaller pages let `useOffsetIndex` fetch tighter ranges in rerank phase 2 at the cost of more page-header overhead.
-  clusters?: number // run binary k-means with this many clusters, sort rows by cluster id, and store centroids in KV metadata. Enables phase 1 row-group skipping at query time. Implies binary=true. Recommended: 64-256 for 100k vectors.
+  clusters?: number // run binary k-means with this many clusters, sort rows by cluster id, and store centroids in KV metadata. Enables phase 1 row-group skipping at query time. Implies binary=true. Default: auto — `round(sqrt(N)/2)` when both `binary` and `clusters` are omitted (i.e. the caller is using full auto mode) and N ≥ 10000, otherwise 0. Pass `0` to force-disable.
   clusterIterations?: number // k-means iterations (default: 6)
   clusterSeed?: number // RNG seed for deterministic clustering (default: 1)
   pq?: boolean // write an IVF-PQ index: float IVF centroids, residual PQ codes, and residual PQ codebooks. Search uses approximate IVF-PQ scoring before exact float32 rerank.
@@ -141,7 +141,6 @@ export interface HypVectorMetadata {
   clusterCounts?: Uint32Array // number of rows in each cluster; cluster k spans [cumsum[k], cumsum[k+1])
   pqSegments?: number // number of PQ sub-vectors / bytes per code
   pqCentroids?: number // number of PQ centroids per sub-vector
-  pqMode?: 'ivf' // PQ index mode
   pqCodebooks?: Float32Array // segment-major residual codebooks, length pqCentroids * dimension
   ivfClusters?: number // number of non-empty IVF lists
   ivfCentroids?: Float32Array // IVF centroids, length ivfClusters * dimension

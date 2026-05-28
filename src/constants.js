@@ -44,3 +44,8 @@ export const defaultPqSampleSize = 4096
 export const defaultIvfClusters = 128
 export const defaultIvfIterations = 6
 export const defaultIvfSampleSize = 4096
+
+// When `binary` is not specified at write time, the column is added once
+// the corpus is at least this large. Below the threshold, exact full scan
+// is fast enough that the rerank path's overhead isn't worth the column.
+export const defaultAutoBinaryThreshold = 10000

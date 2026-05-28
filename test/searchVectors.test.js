@@ -98,7 +98,7 @@ describe('searchVectors', () => {
     const metadata = await parquetMetadataAsync(file)
     const binary = await prefetchBinary({ source: file, metadata })
 
-    const bytesPerRow = (dimension + 7) >> 3
+    const bytesPerRow = dimension + 7 >> 3
     expect(binary.byteLength).toBe(500 * bytesPerRow)
 
     for (const idx of [3, 199, 444]) {

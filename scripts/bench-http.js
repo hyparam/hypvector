@@ -31,7 +31,7 @@ const server = http.createServer((req, res) => {
       res.end()
       return
     }
-    const range = req.headers.range
+    const { range } = req.headers
     if (range) {
       const m = /bytes=(\d+)-(\d+)?/.exec(range)
       if (!m) { res.writeHead(416); res.end(); return }

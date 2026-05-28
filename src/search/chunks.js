@@ -17,7 +17,7 @@ import { computeScore, pushHammingHeap, pushHeap } from './heap.js'
  * @param {number} topK
  */
 export function scoreVectorChunk(columnData, rowStart, dim, query, metric, heap, topK) {
-  const rows = /** @type {Uint8Array[]} */ (columnData)
+  const rows = columnData
   if (rows.length === 0) return
   const first = rows[0]
   if (first.byteOffset % 4 === 0) {
@@ -47,7 +47,7 @@ export function scoreVectorChunk(columnData, rowStart, dim, query, metric, heap,
  * @param {number} candidatesK
  */
 export function hammingScoreChunk(columnData, rowStart, bytesPerRow, queryU32, heap, candidatesK) {
-  const rows = /** @type {Uint8Array[]} */ (columnData)
+  const rows = columnData
   if (rows.length === 0) return
   const wordsPerRow = bytesPerRow >> 2
   const first = rows[0]

@@ -63,15 +63,12 @@ import { writeVectors } from 'hypvector'
 await writeVectors({
   writer: fileWriter('vectors.parquet'),
   dimension: 384,
-  normalize: true,    // L2-normalize on write; lets search skip sqrt for cosine
-  binary: true,       // also write 1-bit-per-dim sign column for binary+rerank search
-  clusters: 128,      // k-means clusters for phase-1 pruning (implies binary: true)
-  pq: true,           // optional IVF-PQ index for approximate scoring before rerank
+  normalize: true,       // L2-normalize on write; lets search skip sqrt for cosine
   vectors: myEmbedder(), // any sync or async iterable of { id, vector }
 })
 ```
 
-When `binary: true`, the default `pageSize` drops to 32 KB so that offset-index reads during search fetch tight ranges. Override with explicit `pageSize` / `codec` / `rowGroupSize` if needed.
+By default, `writeVectors` adds the binary sign-bit column and clusters rows automatically once the corpus crosses ~10k vectors. Below that, files are written as plain id + vector columns and search uses an exact full scan. To control these manually, pass `binary: true/false` and `clusters: <n>`; passing either disables the auto behavior for that knob. When the binary column is written, `pageSize` defaults to 32 KB so offset-index reads during search fetch tight ranges. Pass `pq: true` to additionally write an IVF-PQ index for approximate scoring before rerank (mutually exclusive with binary `clusters`).
 
 ### Producing vectors
 
@@ -106,8 +103,6 @@ await writeVectors({
   writer: fileWriter('vectors.parquet'),
   dimension: 384,
   normalize: true,
-  binary: true,
-  clusters: 128,
   vectors: embed(docs),
 })
 ```
@@ -208,7 +203,6 @@ Key-value metadata:
 | `hypvector.clusters` | number of k-means clusters (0 if not clustered) |
 | `hypvector.centroids` | base64-encoded centroid binary codes (`clusters × dim/8` bytes); present when `clusters > 0` |
 | `hypvector.clusterCounts` | base64-encoded `Uint32Array` of per-cluster row counts; present when `clusters > 0` |
-| `hypvector.pq.mode` | `ivf`; present when `pq: true` |
 | `hypvector.pq.segments` | number of PQ sub-vectors / bytes per code; present when `pq: true` |
 | `hypvector.pq.centroids` | centroids per PQ sub-vector; present when `pq: true` |
 | `hypvector.pq.codebooks` | base64-encoded residual `Float32Array` codebooks (`pq.centroids × dim` floats); present when `pq: true` |

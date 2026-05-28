@@ -6,8 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 HypVector is a library for storing and querying embedding vectors in Parquet files. It targets serverless similarity search: clients fetch a Parquet file (over HTTP range requests or from local disk) and run search directly, without a vector database.
 
-The current implementation is a **naive baseline (v0)**. It is deliberately simple so that future experiments can establish clear baselines for storage size, query latency, and recall.
-
 ## Build and Test Commands
 
 ```bash
@@ -18,7 +16,7 @@ npm run lint:fix    # eslint --fix
 npm run benchmark   # write + search benchmark
 ```
 
-## Architecture (v0 naive)
+## Architecture
 
 ### Storage layout
 

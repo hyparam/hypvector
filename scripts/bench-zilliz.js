@@ -170,7 +170,7 @@ async function runMode(label, queryFn) {
 }
 
 console.log('\n=== Results ===')
-await runMode('A) unfiltered whole-corpus', async ({ vec }) =>
+await runMode('A) unfiltered whole-corpus', ({ vec }) =>
   searchVectors({ source: wholeBuf, metadata: wholeMeta, binary: wholeBin, query: vec, topK: TOP_K })
 )
 
@@ -184,10 +184,10 @@ for (const f of POST_FILTER_OVERFETCHES) {
   })
 }
 
-await runMode('C) shard-as-filter (1 file)', async ({ tenant, vec }) =>
+await runMode('C) shard-as-filter (1 file)', ({ tenant, vec }) =>
   searchVectors({ source: tenantBufs[tenant], metadata: tenantMetas[tenant], binary: tenantBins[tenant], query: vec, topK: TOP_K })
 )
 
-await runMode('C\') shard via array (1 file)', async ({ tenant, vec }) =>
+await runMode('C\') shard via array (1 file)', ({ tenant, vec }) =>
   searchVectors({ source: [tenantBufs[tenant]], metadata: [tenantMetas[tenant]], binary: [tenantBins[tenant]], query: vec, topK: TOP_K })
 )

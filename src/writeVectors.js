@@ -1,6 +1,7 @@
 import { parquetWrite, schemaFromColumnData } from 'hyparquet-writer'
 import { binaryKMeans, reorderClustersByHamming } from './cluster.js'
 import {
+  defaultAutoBinaryThreshold,
   defaultBinaryColumn,
   defaultBinaryPageSize,
   defaultClusterIterations,
@@ -50,9 +51,9 @@ export async function writeVectors({
   metric = 'cosine',
   normalize = false,
   codec = 'UNCOMPRESSED',
-  binary = false,
+  binary,
   pageSize,
-  clusters = 0,
+  clusters,
   clusterIterations = defaultClusterIterations,
   clusterSeed = 1,
   pq = false,
@@ -68,15 +69,19 @@ export async function writeVectors({
   if (!Number.isInteger(dimension) || dimension <= 0) {
     throw new Error(`invalid dimension: ${dimension}`)
   }
-  if (clusters > 0 && !binary) {
-    // Clustering operates on binary codes; require the binary column too.
-    binary = true
-  }
-  if (pq && clusters > 0) {
+  if (pq && clusters !== undefined && clusters > 0) {
     throw new Error('writeVectors: `pq` uses IVF row ordering; do not combine it with binary `clusters`')
   }
+  if (clusters !== undefined && clusters > 0 && binary === false) {
+    throw new Error('writeVectors: clusters > 0 requires binary !== false')
+  }
 
-  const effectivePageSize = pageSize ?? (binary || pq ? defaultBinaryPageSize : undefined)
+  // Auto mode (`binary` / `clusters` omitted): pack binary codes opportunistically
+  // so we can decide once N is known. The dim/8 bytes per vector are negligible
+  // compared to the float32 buffer we're already materializing.
+  const autoBinary = binary === undefined
+  const collectBinary = autoBinary || binary === true || clusters !== undefined && clusters > 0
+
   const binaryBytes = dimension + 7 >> 3
 
   /** @type {string[]} */
@@ -84,7 +89,7 @@ export async function writeVectors({
   /** @type {Uint8Array[]} */
   const packed = []
   /** @type {Uint8Array[] | null} */
-  const packedBin = binary ? [] : null
+  let packedBin = collectBinary ? [] : null
   /** @type {Float32Array[] | null} */
   const vectorsForPq = pq ? [] : null
 
@@ -161,13 +166,28 @@ export async function writeVectors({
     }
   }
 
+  // Resolve auto defaults now that we know N. Auto-clusters only fires
+  // when the caller also let `binary` auto — explicit `binary: true` means
+  // "add the column, don't reshuffle rows".
+  if (autoBinary) binary = ids.length >= defaultAutoBinaryThreshold
+  if (!binary) packedBin = null
+  const clusterCount = clusters ?? (autoBinary && binary ? Math.max(1, Math.round(Math.sqrt(ids.length) / 2)) : 0)
+  if (clusterCount > 0 && !binary) {
+    // Clustering operates on binary codes; require the binary column too.
+    // Only reachable when caller explicitly set clusters > 0 in auto-binary
+    // mode; the explicit `clusters>0 && binary===false` case threw above.
+    binary = true
+  }
+
+  const effectivePageSize = pageSize ?? (binary || pq ? defaultBinaryPageSize : undefined)
+
   /** @type {Uint8Array[] | null} */
   let centroids = null
   /** @type {Uint32Array | null} */
   let clusterCounts = null
-  if (clusters > 0 && packedBin) {
+  if (clusterCount > 0 && packedBin) {
     const { assignments, centroids: cs } = binaryKMeans(
-      packedBin, binaryBytes, clusters, clusterIterations, clusterSeed
+      packedBin, binaryBytes, clusterCount, clusterIterations, clusterSeed
     )
     // Renumber cluster ids so adjacent ids = similar centroids. Lets the
     // top-N nearest clusters at query time collapse to fewer scan ranges.
@@ -226,7 +246,6 @@ export async function writeVectors({
     })
   }
   if (packedPq && pqCodebooks) {
-    kvMetadata.push({ key: 'hypvector.pq.mode', value: 'ivf' })
     kvMetadata.push({ key: 'hypvector.pq.segments', value: String(pqSegmentsOut) })
     kvMetadata.push({ key: 'hypvector.pq.centroids', value: String(pqCentroidsOut) })
     kvMetadata.push({
@@ -278,7 +297,8 @@ export async function writeVectors({
       repetition_type: 'REQUIRED',
     }
   }
-  const schemaInput = columnData.map(c => c.name === defaultIdColumn ? { ...c, type: /** @type {const} */ ('STRING') } : c)
+  /** @type {ColumnSource[]} */
+  const schemaInput = columnData.map(c => c.name === defaultIdColumn ? { ...c, type: /** @type {const} */ 'STRING' } : c)
   const schema = schemaFromColumnData({ columnData: schemaInput, schemaOverrides })
 
   // When clustering, each cluster becomes its own row group so phase-1

@@ -35,7 +35,7 @@ const records = []
 for await (const r of readVectors({ file: src, metadata: srcMd, includeMetadata: false })) records.push(r)
 
 const dim = srcMeta.dimension
-const binaryBytes = (dim + 7) >> 3
+const binaryBytes = dim + 7 >> 3
 const ids = records.map(r => String(r.id))
 const packed = records.map(r => packFloat32(l2Normalize(r.vector)))
 const packedBin = records.map(r => packBinary(l2Normalize(r.vector), dim))
@@ -83,17 +83,17 @@ async function writeVariant(path, { codec, vectorEncoding, vectorCodec, binaryCo
     {
       name: defaultVectorColumn,
       data: packedOut,
-      ...(vectorEncoding ? { encoding: vectorEncoding } : {}),
-      ...(vectorCodec ? { codec: vectorCodec } : {}),
+      ...vectorEncoding ? { encoding: vectorEncoding } : {},
+      ...vectorCodec ? { codec: vectorCodec } : {},
     },
     {
       name: defaultBinaryColumn,
       data: binOut,
-      ...(binaryEncoding ? { encoding: binaryEncoding } : {}),
-      ...(binaryCodec ? { codec: binaryCodec } : {}),
+      ...binaryEncoding ? { encoding: binaryEncoding } : {},
+      ...binaryCodec ? { codec: binaryCodec } : {},
     },
   ]
-  const schemaInput = columnData.map(c => c.name === defaultIdColumn ? { ...c, type: /** @type {const} */ ('STRING') } : c)
+  const schemaInput = columnData.map(c => c.name === defaultIdColumn ? { ...c, type: /** @type {const} */ 'STRING' } : c)
   const schema = schemaFromColumnData({
     columnData: schemaInput,
     schemaOverrides: {

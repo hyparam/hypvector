@@ -70,7 +70,7 @@ export async function searchPq({ file, metadata, meta, queryF32, scoringMetric, 
       useOffsetIndex: true,
       onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
         if (columnName !== defaultVectorColumn) return
-        const rows = /** @type {Uint8Array[]} */ (columnData)
+        const rows = /** @type {Uint8Array[]} */ columnData
         for (let i = 0; i < rows.length; i += 1) {
           const rowIndex = chunkStart + i
           if (!wantedRows.has(rowIndex)) continue
@@ -111,7 +111,7 @@ export async function searchPq({ file, metadata, meta, queryF32, scoringMetric, 
  * @param {number} candidatesK
  */
 function scorePqChunk(columnData, rowStart, meta, scanRanges, query, metric, heap, candidatesK) {
-  const rows = /** @type {Uint8Array[]} */ (columnData)
+  const rows = /** @type {Uint8Array[]} */ columnData
   const segments = meta.pqSegments ?? 0
   const centroids = meta.pqCentroids ?? 0
   const range = findRange(scanRanges, rowStart)
@@ -167,7 +167,7 @@ async function fetchIds(file, metadata, rowIndices, compressors) {
     useOffsetIndex: true,
     onChunk: ({ columnName, columnData, rowStart: chunkStart }) => {
       if (columnName !== defaultIdColumn) return
-      const rows = /** @type {any[]} */ (columnData)
+      const rows = /** @type {any[]} */ columnData
       for (let i = 0; i < rows.length; i += 1) {
         const rowIndex = chunkStart + i
         if (!wanted.has(rowIndex)) continue

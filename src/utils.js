@@ -1,5 +1,5 @@
 /**
- * @import { HypVectorMetadata } from './types.js'
+ * @import { DistanceMetric, HypVectorMetadata } from './types.js'
  * @import { FileMetaData, KeyValue } from 'hyparquet'
  */
 
@@ -145,7 +145,7 @@ export function parseKvMetadata(metadata) {
   }
   const version = parseInt(kv['hypvector.version'] ?? '0', 10)
   const dimension = parseInt(kv['hypvector.dimension'] ?? '0', 10)
-  const metric = /** @type {HypVectorMetadata['metric']} */ (kv['hypvector.metric'] ?? 'cosine')
+  const metric = /** @type {DistanceMetric} */ (kv['hypvector.metric'] ?? 'cosine')
   const normalized = kv['hypvector.normalized'] === 'true'
   const hasBinary = kv['hypvector.binary'] === 'true'
   const hasPq = kv['hypvector.pq'] === 'true'
@@ -175,13 +175,11 @@ export function parseKvMetadata(metadata) {
     out.clusterCounts = new Uint32Array(aligned.buffer, 0, clusters)
   }
   if (hasPq) {
-    const pqMode = kv['hypvector.pq.mode'] ?? 'ivf'
     const pqSegments = parseInt(kv['hypvector.pq.segments'] ?? '0', 10)
     const pqCentroids = parseInt(kv['hypvector.pq.centroids'] ?? '0', 10)
     if (!pqSegments || !pqCentroids) {
       throw new Error('PQ metadata is missing segment or centroid count')
     }
-    out.pqMode = /** @type {HypVectorMetadata['pqMode']} */ (pqMode)
     out.pqSegments = pqSegments
     out.pqCentroids = pqCentroids
     if (kv['hypvector.pq.codebooks']) {

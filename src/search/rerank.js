@@ -99,7 +99,7 @@ export async function searchRerank({ file, metadata, meta, queryF32, scoringMetr
         for (let i = 0; i < columnData.length; i += 1) {
           const rowIndex = chunkStart + i
           if (!wantedRows.has(rowIndex)) continue
-          const bytes = /** @type {Uint8Array[]} */ (columnData)[i]
+          const bytes = columnData[i]
           /** @type {Float32Array} */
           let vector
           if (bytes.byteOffset % 4 === 0) {
@@ -159,7 +159,7 @@ async function fetchIds(file, metadata, rowIndices, compressors) {
       for (let i = 0; i < columnData.length; i += 1) {
         const rowIndex = chunkStart + i
         if (!wanted.has(rowIndex)) continue
-        const raw = /** @type {any} */ (columnData)[i]
+        const raw = columnData[i]
         byRow.set(rowIndex, typeof raw === 'string' ? raw : decoder.decode(raw))
       }
     },

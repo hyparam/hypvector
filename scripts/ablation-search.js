@@ -30,7 +30,7 @@ const sourceFile = await asyncBufferFromFile(FILE)
 const metadata = await parquetMetadataAsync(sourceFile)
 const meta = parseKvMetadata(metadata)
 console.log(`File: ${FILE} (${(stat.size / 1e6).toFixed(1)} MB; ${meta.count} × ${meta.dimension})`)
-
+/** @type {Float32Array[]} */
 const queries = []
 const step = Math.max(1, Math.floor(meta.count / 11))
 let i = 0
@@ -57,6 +57,10 @@ function instrument(buf) {
   return w
 }
 
+/**
+ * @param {(q: Float32Array, cached: AsyncBuffer) => Promise<{ id: string, score: number, rowIndex: number }[]>} searchFn
+ * @returns {Promise<{ ms: number, mb: number, fetches: number, tops: string[][] }>}
+ */
 async function bench(searchFn) {
   const times = [], bytes = [], fetches = [], tops = []
   for (const q of queries) {
@@ -81,15 +85,15 @@ function avg(a) {
 }
 
 // E1: baseline using the current searchVectors
-const E1 = await bench(async (q, cached) => searchVectors({
+const E1 = await bench((q, cached) => searchVectors({
   source: cached, metadata, query: q, topK: 10,
 }))
 
 // E2: same path but per-candidate (no run coalescing). Implemented inline.
-const E2 = await bench(async (q, cached) => searchAblated(q, cached, { coalesce: false, deferId: true }))
+const E2 = await bench((q, cached) => searchAblated(q, cached, { coalesce: false, deferId: true }))
 
 // E3: same as E1 but ids fetched in phase 2 alongside vectors.
-const E3 = await bench(async (q, cached) => searchAblated(q, cached, { coalesce: true, deferId: false }))
+const E3 = await bench((q, cached) => searchAblated(q, cached, { coalesce: true, deferId: false }))
 
 /**
  * @param {string[][]} ref
@@ -141,9 +145,10 @@ async function searchAblated(query, file, opts) {
 
   // Pick clusters
   const cs = meta.centroids
-  const counts = meta.clusterCounts
   const offsets = new Uint32Array(cs.length + 1)
-  for (let c = 0; c < cs.length; c += 1) offsets[c + 1] = offsets[c] + counts[c]
+  for (let c = 0; c < cs.length; c += 1) {
+    offsets[c + 1] = offsets[c] + meta.clusterCounts[c]
+  }
   const ranked = cs.map((c, i) => ({ i, d: hammingDistanceBytes(queryBin, c) })).sort((a, b) => a.d - b.d)
   const probe = Math.max(1, Math.ceil(cs.length * defaultClusterProbeFraction))
   const wantedClusters = ranked.slice(0, probe).map(c => c.i).sort((a, b) => a - b)
@@ -156,7 +161,7 @@ async function searchAblated(query, file, opts) {
     file, metadata, columns: [defaultBinaryColumn], rowStart, rowEnd, useOffsetIndex: true,
     onChunk: ({ columnName, columnData, rowStart: cs0 }) => {
       if (columnName !== defaultBinaryColumn) return
-      const rows = /** @type {Uint8Array[]} */ (columnData)
+      const rows = columnData
       if (rows.length === 0) return
       const flat = rows[0].byteOffset % 4 === 0 ? new Uint32Array(rows[0].buffer, rows[0].byteOffset, rows.length * wordsPerRow) : null
       for (let r = 0; r < rows.length; r += 1) {
@@ -225,6 +230,11 @@ async function searchAblated(query, file, opts) {
   return winners.map(w => ({ id: w.id ?? String(w.rowIndex), score: w.score, rowIndex: w.rowIndex }))
 }
 
+/**
+ * @param {number[]} rows
+ * @param {number} gap
+ * @returns {{ rowStart: number, rowEnd: number }[]}
+ */
 function coalesce(rows, gap) {
   const out = []
   let s = rows[0]; let e = rows[0] + 1
@@ -236,6 +246,11 @@ function coalesce(rows, gap) {
   return out
 }
 
+/**
+ * @param {AsyncBuffer} file
+ * @param {number[]} rows
+ * @returns {Promise<string[]>}
+ */
 async function fetchIds(file, rows) {
   const sorted = [...new Set(rows)].sort((a, b) => a - b)
   const wanted = new Set(sorted)

@@ -14,7 +14,7 @@ const origLookup = dns.lookup
 // @ts-expect-error overload signature
 dns.lookup = (hostname, opts, cb) => {
   if (typeof opts === 'function') { cb = opts; opts = {} }
-  return origLookup.call(dns, hostname, { ...(opts ?? {}), family: 4 }, cb)
+  return origLookup.call(dns, hostname, { ...opts ?? {}, family: 4 }, cb)
 }
 
 import { asyncBufferFromFile, asyncBufferFromUrl, cachedAsyncBuffer, parquetMetadataAsync } from 'hyparquet'

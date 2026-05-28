@@ -92,11 +92,45 @@ describe('writeVectors', () => {
     expect(meta.hasPq).toBe(true)
     expect(meta.pqSegments).toBe(8)
     expect(meta.pqCentroids).toBe(4)
-    expect(meta.pqMode).toBe('ivf')
     expect(meta.pqCodebooks?.length).toBe(4 * dimension)
     expect(meta.ivfClusters).toBeGreaterThan(0)
     expect(meta.ivfCentroids?.length).toBe((meta.ivfClusters ?? 0) * dimension)
     expect(meta.ivfCounts?.length).toBe(meta.ivfClusters)
     expect(metadata.schema.some(s => s.name === 'vector_pq')).toBe(true)
+  })
+
+  it('auto-disables binary and clusters when N is below the threshold', async () => {
+    const dimension = 32
+    const writer = fileWriter(TEST_FILE)
+    await writeVectors({ writer, dimension, vectors: makeVectors(50, dimension) })
+    const file = await asyncBufferFromFile(TEST_FILE)
+    const meta = await parquetMetadataAsync(file)
+    /**
+     * @param {string} key
+     * @returns {string | undefined}
+     */
+    function find(key) {
+      return meta.key_value_metadata?.find(e => e.key === key)?.value
+    }
+    expect(find('hypvector.binary')).toBe('false')
+    expect(find('hypvector.clusters')).toBe('0')
+  })
+
+  it('auto-enables binary and auto-picks clusters at large N', async () => {
+    const dimension = 32
+    const writer = fileWriter(TEST_FILE)
+    await writeVectors({ writer, dimension, vectors: makeVectors(10000, dimension) })
+    const file = await asyncBufferFromFile(TEST_FILE)
+    const meta = await parquetMetadataAsync(file)
+    /**
+     * @param {string} key
+     * @returns {string | undefined}
+     */
+    function find(key) {
+      return meta.key_value_metadata?.find(e => e.key === key)?.value
+    }
+    expect(find('hypvector.binary')).toBe('true')
+    // round(sqrt(10000)/2) = 50
+    expect(find('hypvector.clusters')).toBe('50')
   })
 })
