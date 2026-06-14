@@ -1,5 +1,7 @@
 # HypVector
 
+![hypvector](hypvector.jpg)
+
 [![npm](https://img.shields.io/npm/v/hypvector)](https://www.npmjs.com/package/hypvector)
 [![minzipped](https://img.shields.io/bundlephobia/minzip/hypvector)](https://www.npmjs.com/package/hypvector)
 [![mit license](https://img.shields.io/badge/License-MIT-orange.svg)](https://opensource.org/licenses/MIT)
