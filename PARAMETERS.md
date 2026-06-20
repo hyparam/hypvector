@@ -6,6 +6,8 @@ Every user-facing knob in hypvector, what it does, and where the value lives at 
 
 | Param | Default | What it does |
 |---|---|---|
+| `writer` | required | Output parquet `Writer` (e.g. from `fileWriter('vectors.parquet')`). Where the bytes go. |
+| `vectors` | required | Sync or async iterable of `{ id, vector }` records to write. |
 | `dimension` | required | Length of each vector. Stored in KV `hypvector.dimension`. |
 | `metric` | `'cosine'` | Intended similarity metric. Hint stored in KV; search reads it. |
 | `normalize` | `false` | L2-normalize on write; lets cosine score via dot product. Stored in KV `hypvector.normalized`. |
@@ -25,6 +27,7 @@ Every user-facing knob in hypvector, what it does, and where the value lives at 
 | `source` | required | URL, file path, AsyncBuffer, or array of any of those (parallel multi-file search). |
 | `topK` | `10` | Number of nearest neighbors to return. |
 | `metric` | from KV | Override the stored metric. Almost never needed. |
+| `algorithm` | `'auto'` | Search path. `'auto'` uses binary+rerank when the file has a binary column, else exact full scan. `'exact'` forces a full scan; `'binary'` forces the rerank path (errors if the file has no binary column). |
 | `rerankFactor` | `10` | Candidate pool size = `topK × rerankFactor`. `0` forces exact full scan. Higher = more recall, more bytes fetched. Suggested `~max(10, N/3000)`. |
 | `probe` | `0.25` | Fraction (or integer count) of clusters to scan in phase 1. Lower = faster, lower recall. Ignored if file has no centroids. |
 | `binary` | none | Pre-fetched binary column (from `prefetchBinary`). When provided, phase-1 Hamming scan runs from memory. |

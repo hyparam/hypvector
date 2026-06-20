@@ -1,6 +1,7 @@
 {
   "name": "hypvector",
   "version": "0.1.1",
+  "description": "Vector similarity search directly over Parquet files",
   "author": "Hyperparam",
   "homepage": "https://hyperparam.app",
   "license": "MIT",
@@ -44,16 +45,16 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "hyparquet": "1.26.0",
+    "hyparquet": "1.26.1",
     "hyparquet-compressors": "1.1.1",
     "hyparquet-writer": "0.16.1"
   },
   "devDependencies": {
-    "@types/node": "25.9.1",
-    "@vitest/coverage-v8": "4.1.7",
+    "@types/node": "26.0.0",
+    "@vitest/coverage-v8": "4.1.9",
     "eslint": "9.39.4",
-    "eslint-plugin-jsdoc": "63.0.0",
+    "eslint-plugin-jsdoc": "63.0.6",
     "typescript": "6.0.3",
-    "vitest": "4.1.7"
+    "vitest": "4.1.9"
   }
 }

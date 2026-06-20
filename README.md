@@ -4,11 +4,16 @@
 
 [![npm](https://img.shields.io/npm/v/hypvector)](https://www.npmjs.com/package/hypvector)
 [![minzipped](https://img.shields.io/bundlephobia/minzip/hypvector)](https://www.npmjs.com/package/hypvector)
+[![workflow status](https://github.com/hyparam/hypvector/actions/workflows/ci.yml/badge.svg)](https://github.com/hyparam/hypvector/actions)
 [![mit license](https://img.shields.io/badge/License-MIT-orange.svg)](https://opensource.org/licenses/MIT)
+![coverage](https://img.shields.io/badge/Coverage-87-darkred)
+[![dependencies](https://img.shields.io/badge/Dependencies-3-blueviolet)](https://www.npmjs.com/package/hypvector?activeTab=dependencies)
 
 ## What is hypvector?
 
 **HypVector** is a JavaScript library for storing and querying embedding vectors directly out of [Apache Parquet](https://parquet.apache.org) files. It builds on [`hyparquet`](https://github.com/hyparam/hyparquet) and [`hyparquet-writer`](https://github.com/hyparam/hyparquet-writer) so that a Parquet file on S3 (or local disk) acts as the vector database. Any client can run similarity search over HTTP range requests, without a server in between.
+
+> Part of **[HypStack](https://hypstack.ai/)**, an open-source stack for AI observability.
 
  - Works in browsers and node.js
  - Self-describing files (dimension, metric, normalization, cluster centroids in Parquet KV metadata)
@@ -221,6 +226,22 @@ The default `rerankFactor` of 10 is tuned for the hundreds-of-thousands range. A
 | 300 | 3,000 | 443 | 98% |
 
 Rough rule: `rerankFactor ≈ max(10, N / 3000)`. At 1M that's ~333, giving ~98% recall at ~440 ms, still about an order of magnitude faster than the 950 ms exact scan.
+
+## Benchmarks
+
+Vector search over 837,989 real LLM conversations ([WildChat-1M](https://huggingface.co/datasets/allenai/WildChat-1M)), run against the same data on every engine. hypvector keeps the vectors in a Parquet file in object storage and runs the query in the client, so there is no server and no idle cost.
+
+| Engine | Storage | Recall@10 | Query | All-in / mo | Server |
+|---|---:|---:|---:|---:|---|
+| **hypvector** | 3.58 GB | 0.975 | 46 ms <sup>†</sup> | **~$0.08** | none |
+| pgvector | 11.5 GB | 0.965 | ~1 ms <sup>†</sup> | $94 | r5.large 24/7 |
+| Qdrant | 3.6 GB | 0.965 | 2 ms <sup>†</sup> | $62 | t3.large 24/7 |
+| turbopuffer | 3.43 GB | 0.93 | 60 ms <sup>‡</sup> | $64 min | managed |
+| Pinecone | 3.43 GB | 0.97 | 125 ms <sup>‡</sup> | $50 min | managed |
+
+<sup>†</sup> local compute, no network. <sup>‡</sup> live cloud, includes real internet round-trip.
+
+The always-on engines win raw latency by keeping a hot index in RAM, which is what the monthly bill pays for. hypvector trades that for zero idle cost, a smaller footprint, and no infrastructure.
 
 ## Performance
 
