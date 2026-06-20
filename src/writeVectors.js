@@ -38,7 +38,7 @@ export async function writeVectors({
   dimension,
   rowGroupSize,
   metric = 'cosine',
-  normalize = false,
+  normalize = true,
   codec = 'UNCOMPRESSED',
   binary,
   pageSize,

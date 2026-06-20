@@ -16,7 +16,7 @@ export interface WriteVectorsOptions {
   dimension: number // length of every vector (must match)
   rowGroupSize?: number // rows per row group (default: 10000)
   metric?: DistanceMetric // hint stored in kv metadata (default: 'cosine')
-  normalize?: boolean // l2-normalize vectors on write (default: false)
+  normalize?: boolean // l2-normalize vectors on write (default: true). Harmless if vectors are already unit-length. Pass `false` to preserve raw magnitudes (e.g. for dot/euclidean on unnormalized vectors).
   codec?: CompressionCodec // parquet codec (default: 'UNCOMPRESSED'; SNAPPY rarely shrinks float embeddings and costs ~2-3x query latency. ZSTD on write isn't supported here — hyparquet-compressors only ships decompressors.)
   binary?: boolean // also write a 1-bit-per-dim sign-bit column for binary+rerank search (default: auto — on when N ≥ 10000; adds ~1.5% file size at 384-dim). Pass `false` to force-disable.
   pageSize?: number // target page size in bytes (default: 1 MB). Smaller pages let `useOffsetIndex` fetch tighter ranges in rerank phase 2 at the cost of more page-header overhead.

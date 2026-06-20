@@ -17,7 +17,7 @@ describe('readVectors', () => {
     const dimension = 16
     const original = makeVectors(25, dimension, 42)
     const writer = fileWriter(TEST_FILE)
-    await writeVectors({ writer, vectors: original, dimension })
+    await writeVectors({ writer, vectors: original, dimension, normalize: false })
 
     const file = await asyncBufferFromFile(TEST_FILE)
     const read = []

@@ -36,7 +36,7 @@ describe('writeVectors', () => {
     expect(find('hypvector.version')).toBe('0')
     expect(find('hypvector.dimension')).toBe('8')
     expect(find('hypvector.metric')).toBe('cosine')
-    expect(find('hypvector.normalized')).toBe('false')
+    expect(find('hypvector.normalized')).toBe('true')
   })
 
   it('rejects vectors with the wrong dimension', async () => {
@@ -131,7 +131,7 @@ describe('writeVectors', () => {
 
     // binary: false takes the streaming fast path: row-group-sized batches are
     // packed and flushed without materializing the whole dataset.
-    await writeVectors({ writer, dimension, vectors: source, binary: false })
+    await writeVectors({ writer, dimension, vectors: source, binary: false, normalize: false })
 
     const file = await asyncBufferFromFile(TEST_FILE)
     const meta = await parquetMetadataAsync(file)

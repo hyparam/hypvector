@@ -70,7 +70,8 @@ import { writeVectors } from 'hypvector'
 await writeVectors({
   writer: fileWriter('vectors.parquet'),
   dimension: 384,
-  normalize: true,       // L2-normalize on write; lets search skip sqrt for cosine
+  // normalize defaults to true: L2-normalize on write, lets search skip sqrt for cosine.
+  // Pass normalize: false only if you need raw magnitudes (e.g. dot/euclidean on unnormalized vectors).
   vectors: myEmbedder(), // any sync or async iterable of { id, vector }
 })
 ```
@@ -83,7 +84,7 @@ HypVector is BYO-embedding: you decide which model produces the vectors. It just
 
 1. **Same model on write and query.** Embeddings from different models aren't comparable.
 2. **Same `dimension`** for every record (must match the `dimension` you pass to `writeVectors`).
-3. **`normalize: true`** is the right default for any model whose vectors aren't already unit-length and you intend to query with cosine; it saves the per-candidate sqrt at query time. If your model already normalizes (most modern sentence-transformer models do), still pass `normalize: true` so the flag is recorded in KV metadata.
+3. **`normalize` defaults to `true`**, the right choice for any model whose vectors aren't already unit-length and you intend to query with cosine; it saves the per-candidate sqrt at query time. If your model already normalizes (most modern sentence-transformer models do), the default is harmless and records the flag in KV metadata. Pass `normalize: false` only when you want to preserve raw magnitudes for `dot`/`euclidean`.
 
 The natural shape is an async generator that yields embedded records as you batch them through your embedder.
 

@@ -19,7 +19,7 @@ Each parameter below has a current state, a target strategy, and the experiments
 |---|---|---|---|
 | `dimension` | required | **Required** | Caller's model dictates this. No automation possible. |
 | `metric` | `'cosine'` default, in KV | **KV-metadata** (done) | Defaults to `'cosine'`, stored in KV, read transparently at search. |
-| `normalize` | `false` arg | **KV-metadata, default `true` (not yet flipped)** | Cosine + normalized = dot, which dominates everywhere. Every benchmark ran normalized with no downside, and the README/quickstart already pass `true`. Open: flip the *code* default so callers can omit it. Harmless if vectors are already unit-length. |
+| `normalize` | **default `true` (shipped)** | **KV-metadata, default `true`** | Cosine + normalized = dot, which dominates everywhere. Every benchmark ran normalized with no downside. Code default flipped to `true`; callers can omit it. Harmless if already unit-length. Kept as a flag (not forced) because `dot`/`euclidean` are magnitude-sensitive and would silently break if always normalized. |
 | `binary` | **Auto (shipped)** | **Derive(N): on at N ≥ 10k** | Shipped: auto-on at `defaultAutoBinaryThreshold = 10000` (~1.5% extra bytes for ~50× fewer bytes-read in phase 2). Below threshold, exact scan is fine. Small-N crossover still unmeasured (see open experiments). |
 | `clusters` | **Auto (shipped)** | **Derive(N): `round(√N/2)`** | Shipped: `round(√N/2)` when binary auto-on (`writeVectors.js`). The sweep below locked in `√N/2` over `√N` (better latency, same recall on both corpora). Caller can still pass an explicit count or `0`. |
 | `clusterIterations` | `6` | **Fixed (6)** | The existing ablations show diminishing returns past 6. Hide the knob. |
@@ -183,15 +183,14 @@ Lessons:
 
 ## End state for the public API
 
-The common case is now (one open item: flip the `normalize` default to `true`):
+The common case is now:
 
 ```js
 await writeVectors({
   writer: fileWriter('vectors.parquet'),
   dimension: 384,
-  normalize: true, // still required explicitly; flipping the default is the last open write-side item
   vectors: embed(docs),
-}) // binary auto at N≥10k, clusters≈√N/2 (both automatic)
+}) // normalize defaults to true; binary auto at N≥10k, clusters≈√N/2 (all automatic)
 
 const results = await searchVectors({
   source: 'vectors.parquet',
