@@ -197,7 +197,6 @@ Key-value metadata:
 | `hypvector.metric` | `cosine` \| `dot` \| `euclidean` |
 | `hypvector.normalized` | `true` if vectors were L2-normalized on write |
 | `hypvector.binary` | `true` if the `vector_bin` column is present |
-| `hypvector.count` | number of vectors |
 | `hypvector.clusters` | number of k-means clusters (0 if not clustered) |
 | `hypvector.centroids` | base64-encoded centroid binary codes (`clusters × dim/8` bytes); present when `clusters > 0` |
 | `hypvector.clusterCounts` | base64-encoded `Uint32Array` of per-cluster row counts; present when `clusters > 0` |

@@ -71,7 +71,7 @@ function b64(bytes) {
 const kvMetadata = [
   { key: 'hypvector.version', value: '0' }, { key: 'hypvector.dimension', value: String(dim) },
   { key: 'hypvector.metric', value: 'cosine' }, { key: 'hypvector.normalized', value: 'true' },
-  { key: 'hypvector.binary', value: 'true' }, { key: 'hypvector.count', value: String(ids.length) },
+  { key: 'hypvector.binary', value: 'true' },
   { key: 'hypvector.clusters', value: String(centroids.length) },
   { key: 'hypvector.centroids', value: b64(centBuf) },
   { key: 'hypvector.clusterCounts', value: b64(new Uint8Array(counts.buffer)) },

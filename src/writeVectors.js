@@ -1,4 +1,4 @@
-import { parquetWrite, schemaFromColumnData } from 'hyparquet-writer'
+import { parquetWrite, parquetWriteRows, schemaFromColumnData } from 'hyparquet-writer'
 import { binaryKMeans, reorderClustersByHamming } from './cluster.js'
 import {
   defaultAutoBinaryThreshold,
@@ -13,9 +13,9 @@ import {
 import { encodeBase64, l2Normalize, packBinary, packFloat32 } from './utils.js'
 
 /**
- * @import { WriteVectorsOptions } from './types.js'
- * @import { ColumnSource } from 'hyparquet-writer'
- * @import { SchemaElement } from 'hyparquet'
+ * @import { VectorRecord, WriteVectorsOptions } from './types.js'
+ * @import { ColumnSource, Writer } from 'hyparquet-writer'
+ * @import { CompressionCodec, KeyValue, SchemaElement } from 'hyparquet'
  */
 
 /**
@@ -24,7 +24,7 @@ import { encodeBase64, l2Normalize, packBinary, packFloat32 } from './utils.js'
  * Columns:
  *   - `id`: STRING (caller-supplied id, coerced to string)
  *   - `vector`: FIXED_LEN_BYTE_ARRAY(4 * dimension) raw little-endian float32 bytes
- *   - `vector_bin`: FIXED_LEN_BYTE_ARRAY(dim/8) — written when `binary: true`
+ *   - `vector_bin`: FIXED_LEN_BYTE_ARRAY(dim/8), written when `binary: true`
  *
  * When `clusters > 0`, rows are reordered by binary cluster id and the
  * centroids plus per-cluster row counts go into KV metadata.
@@ -53,47 +53,60 @@ export async function writeVectors({
     throw new Error('writeVectors: clusters > 0 requires binary !== false')
   }
 
-  // Auto mode (`binary` / `clusters` omitted): pack binary codes opportunistically
-  // so we can decide once N is known. The dim/8 bytes per vector are negligible
-  // compared to the float32 buffer we're already materializing.
-  const autoBinary = binary === undefined
-  const collectBinary = autoBinary || binary === true || clusters !== undefined && clusters > 0
-
   const binaryBytes = dimension + 7 >> 3
+  const willCluster = clusters !== undefined && clusters > 0
+
+  // Streaming fast path: when `binary` is set explicitly and no clustering is
+  // requested, the schema is fully determined up front and rows are emitted in
+  // input order, so each row-group-sized batch can be packed and flushed
+  // without ever holding the whole dataset. Peak memory is one row group, not
+  // O(N). Auto-binary (binary omitted) needs N to choose the column set, and
+  // clustering needs a global k-means + row reorder, so both fall through to
+  // the buffered path below.
+  if (binary !== undefined && !willCluster) {
+    return streamVectors({
+      writer,
+      vectors,
+      dimension,
+      binaryBytes,
+      binary,
+      normalize,
+      metric,
+      codec,
+      rowGroupSize: rowGroupSize ?? defaultRowGroupSize,
+      pageSize: pageSize ?? (binary ? defaultBinaryPageSize : undefined),
+    })
+  }
+
+  // Buffered path: auto-binary and clustering both need the whole dataset in
+  // memory: auto-binary to count N before choosing the column set, clustering
+  // to k-means the binary codes and reorder rows so each cluster is contiguous.
+  const autoBinary = binary === undefined
 
   /** @type {string[]} */
   const ids = []
   /** @type {Uint8Array[]} */
   const packed = []
-  /** @type {Uint8Array[] | null} */
-  let packedBin = collectBinary ? [] : null
+  /** @type {Uint8Array[]} */
+  const packedBin = []
 
   for await (const record of vectors) {
-    const { id, vector } = record
-    if (!vector || vector.length !== dimension) {
-      throw new Error(`vector for id=${id} has length ${vector?.length}, expected ${dimension}`)
-    }
-    const v = normalize
-      ? l2Normalize(vector)
-      : vector instanceof Float32Array ? vector : Float32Array.from(vector)
-    ids.push(String(id))
+    const v = toFloat32(record.vector, dimension, normalize, record.id)
+    ids.push(String(record.id))
     packed.push(packFloat32(v))
-    if (packedBin) packedBin.push(packBinary(v, dimension))
+    packedBin.push(packBinary(v, dimension))
   }
 
   // Resolve auto defaults now that we know N. Auto-clusters only fires
-  // when the caller also let `binary` auto — explicit `binary: true` means
+  // when the caller also let `binary` auto; explicit `binary: true` means
   // "add the column, don't reshuffle rows".
   if (autoBinary) binary = ids.length >= defaultAutoBinaryThreshold
   binary = binary === true
-  if (!binary) packedBin = null
   const clusterCount = clusters ?? (autoBinary && binary ? Math.max(1, Math.round(Math.sqrt(ids.length) / 2)) : 0)
-  if (clusterCount > 0 && !binary) {
-    // Clustering operates on binary codes; require the binary column too.
-    // Only reachable when caller explicitly set clusters > 0 in auto-binary
-    // mode; the explicit `clusters>0 && binary===false` case threw above.
-    binary = true
-  }
+  // Clustering operates on the binary codes, so it implies the binary column
+  // even when auto-binary would have left it off at small N (explicit
+  // `clusters > 0` with a sub-threshold corpus).
+  if (clusterCount > 0) binary = true
 
   const effectivePageSize = pageSize ?? (binary ? defaultBinaryPageSize : undefined)
 
@@ -101,7 +114,7 @@ export async function writeVectors({
   let centroids = null
   /** @type {Uint32Array | null} */
   let clusterCounts = null
-  if (clusterCount > 0 && packedBin) {
+  if (clusterCount > 0) {
     const { assignments, centroids: cs } = binaryKMeans(
       packedBin, binaryBytes, clusterCount, clusterIterations, clusterSeed
     )
@@ -119,15 +132,8 @@ export async function writeVectors({
     permuteInPlace(sorted, [ids, packed, packedBin])
   }
 
-  const kvMetadata = [
-    { key: 'hypvector.version', value: String(hypVectorVersion) },
-    { key: 'hypvector.dimension', value: String(dimension) },
-    { key: 'hypvector.metric', value: metric },
-    { key: 'hypvector.normalized', value: String(normalize) },
-    { key: 'hypvector.binary', value: String(binary) },
-    { key: 'hypvector.count', value: String(ids.length) },
-    { key: 'hypvector.clusters', value: String(centroids ? centroids.length : 0) },
-  ]
+  const kvMetadata = baseKvMetadata({ dimension, metric, normalize, binary })
+  kvMetadata.push({ key: 'hypvector.clusters', value: String(centroids ? centroids.length : 0) })
   if (centroids && clusterCounts) {
     // Pack centroids as one contiguous Uint8Array, then base64-encode.
     const buf = new Uint8Array(centroids.length * binaryBytes)
@@ -146,6 +152,131 @@ export async function writeVectors({
     { name: defaultIdColumn, data: ids },
     { name: defaultVectorColumn, data: packed },
   ]
+  if (binary) columnData.push({ name: defaultBinaryColumn, data: packedBin })
+
+  // When clustering, each cluster becomes its own row group so phase-1
+  // binary scans and phase-2 candidate fetches stay within a single column
+  // chunk per cluster, dropping fetches roughly proportional to clusters
+  // probed. Caller-supplied rowGroupSize wins if explicitly passed.
+  const effectiveRowGroupSize = rowGroupSize ?? (
+    clusterCounts ? Array.from(clusterCounts) : defaultRowGroupSize
+  )
+
+  await parquetWrite({
+    writer,
+    schema: vectorSchema({ dimension, binary, binaryBytes }),
+    rowGroupSize: effectiveRowGroupSize,
+    kvMetadata,
+    columnData,
+    codec,
+    ...effectivePageSize !== undefined ? { pageSize: effectivePageSize } : {},
+  })
+}
+
+/**
+ * Streaming writer for the no-cluster, explicit-binary case. Packs and flushes
+ * one row-group-sized batch at a time through {@link parquetWriteRows}, so peak
+ * memory is bounded by the row-group size rather than the dataset size. The
+ * schema and KV metadata are fully known up front (row count is recovered from
+ * the parquet footer's `num_rows`, so nothing here depends on N).
+ *
+ * @param {object} options
+ * @param {Writer} options.writer
+ * @param {Iterable<VectorRecord> | AsyncIterable<VectorRecord>} options.vectors
+ * @param {number} options.dimension
+ * @param {number} options.binaryBytes
+ * @param {boolean} options.binary
+ * @param {boolean} options.normalize
+ * @param {string} options.metric
+ * @param {CompressionCodec} options.codec
+ * @param {number | number[]} options.rowGroupSize
+ * @param {number} [options.pageSize]
+ * @returns {Promise<void>}
+ */
+async function streamVectors({ writer, vectors, dimension, binaryBytes, binary, normalize, metric, codec, rowGroupSize, pageSize }) {
+  /** @type {Omit<ColumnSource, 'data'>[]} */
+  const columns = [{ name: defaultIdColumn }, { name: defaultVectorColumn }]
+  if (binary) columns.push({ name: defaultBinaryColumn })
+
+  const kvMetadata = baseKvMetadata({ dimension, metric, normalize, binary })
+  kvMetadata.push({ key: 'hypvector.clusters', value: '0' })
+
+  /**
+   * Map each input record to a parquet row, packing on the fly so only one
+   * row group's worth of packed bytes is ever live at once.
+   * @returns {AsyncGenerator<Record<string, string | Uint8Array>>}
+   */
+  async function* rows() {
+    for await (const record of vectors) {
+      const v = toFloat32(record.vector, dimension, normalize, record.id)
+      /** @type {Record<string, string | Uint8Array>} */
+      const row = {
+        [defaultIdColumn]: String(record.id),
+        [defaultVectorColumn]: packFloat32(v),
+      }
+      if (binary) row[defaultBinaryColumn] = packBinary(v, dimension)
+      yield row
+    }
+  }
+
+  await parquetWriteRows({
+    writer,
+    rows: rows(),
+    columns,
+    schema: vectorSchema({ dimension, binary, binaryBytes }),
+    rowGroupSize,
+    kvMetadata,
+    codec,
+    ...pageSize !== undefined ? { pageSize } : {},
+  })
+}
+
+/**
+ * Validate one record's vector and return it as a Float32Array, L2-normalized
+ * when requested. Reuses the caller's Float32Array in place when possible.
+ *
+ * @param {Float32Array | number[]} vector
+ * @param {number} dimension
+ * @param {boolean} normalize
+ * @param {string | number} id
+ * @returns {Float32Array}
+ */
+function toFloat32(vector, dimension, normalize, id) {
+  if (!vector || vector.length !== dimension) {
+    throw new Error(`vector for id=${id} has length ${vector?.length}, expected ${dimension}`)
+  }
+  return normalize
+    ? l2Normalize(vector)
+    : vector instanceof Float32Array ? vector : Float32Array.from(vector)
+}
+
+/**
+ * KV metadata shared by both write paths: everything knowable without N. The
+ * vector count is intentionally omitted: it's exactly the parquet footer's
+ * `num_rows`, which readers already use (see parseKvMetadata).
+ *
+ * @param {{ dimension: number, metric: string, normalize: boolean, binary: boolean }} options
+ * @returns {KeyValue[]}
+ */
+function baseKvMetadata({ dimension, metric, normalize, binary }) {
+  return [
+    { key: 'hypvector.version', value: String(hypVectorVersion) },
+    { key: 'hypvector.dimension', value: String(dimension) },
+    { key: 'hypvector.metric', value: metric },
+    { key: 'hypvector.normalized', value: String(normalize) },
+    { key: 'hypvector.binary', value: String(binary) },
+  ]
+}
+
+/**
+ * Build the parquet schema for the vector columns. Independent of row count and
+ * data values (types are forced via overrides / the id STRING hint), so it
+ * works for both the buffered and streaming paths.
+ *
+ * @param {{ dimension: number, binary: boolean, binaryBytes: number }} options
+ * @returns {SchemaElement[]}
+ */
+function vectorSchema({ dimension, binary, binaryBytes }) {
   /** @type {Record<string, SchemaElement>} */
   const schemaOverrides = {
     [defaultVectorColumn]: {
@@ -155,8 +286,13 @@ export async function writeVectors({
       repetition_type: 'REQUIRED',
     },
   }
-  if (packedBin) {
-    columnData.push({ name: defaultBinaryColumn, data: packedBin })
+  /** @type {ColumnSource[]} */
+  const columnData = [
+    { name: defaultIdColumn, type: 'STRING', data: [] },
+    { name: defaultVectorColumn, data: [] },
+  ]
+  if (binary) {
+    columnData.push({ name: defaultBinaryColumn, data: [] })
     schemaOverrides[defaultBinaryColumn] = {
       name: defaultBinaryColumn,
       type: 'FIXED_LEN_BYTE_ARRAY',
@@ -164,27 +300,7 @@ export async function writeVectors({
       repetition_type: 'REQUIRED',
     }
   }
-  /** @type {ColumnSource[]} */
-  const schemaInput = columnData.map(c => c.name === defaultIdColumn ? { ...c, type: /** @type {const} */ 'STRING' } : c)
-  const schema = schemaFromColumnData({ columnData: schemaInput, schemaOverrides })
-
-  // When clustering, each cluster becomes its own row group so phase-1
-  // binary scans and phase-2 candidate fetches stay within a single column
-  // chunk per cluster — drops fetches roughly proportional to clusters
-  // probed. Caller-supplied rowGroupSize wins if explicitly passed.
-  const effectiveRowGroupSize = rowGroupSize ?? (
-    clusterCounts ? Array.from(clusterCounts) : defaultRowGroupSize
-  )
-
-  await parquetWrite({
-    writer,
-    schema,
-    rowGroupSize: effectiveRowGroupSize,
-    kvMetadata,
-    columnData,
-    codec,
-    ...effectivePageSize !== undefined ? { pageSize: effectivePageSize } : {},
-  })
+  return schemaFromColumnData({ columnData, schemaOverrides })
 }
 
 /**
