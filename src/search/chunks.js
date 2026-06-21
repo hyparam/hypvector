@@ -51,9 +51,20 @@ export function hammingScoreChunk(columnData, rowStart, bytesPerRow, queryU32, h
   if (rows.length === 0) return
   const wordsPerRow = bytesPerRow >> 2
   const first = rows[0]
-  const aligned = first.byteOffset % 4 === 0
-  const flat = aligned ? new Uint32Array(first.buffer, first.byteOffset, rows.length * wordsPerRow) : null
-  const scratchU32 = aligned ? null : new Uint32Array(wordsPerRow)
+  const last = rows[rows.length - 1]
+  // The flat-view fast path is only valid when every row is a 4-byte-aligned,
+  // tightly-packed slice of a single backing buffer. A row range read from a
+  // clustered file can be assembled from several page buffers, in which case
+  // `rows` is not one contiguous block — building a span over it would read
+  // out of bounds (RangeError) or, if the first buffer is large enough, score
+  // the wrong bytes. Verify contiguity in O(1) via the last row, else fall
+  // back to the per-row scratch copy (always correct).
+  const contiguous = first.byteOffset % 4 === 0
+    && last.buffer === first.buffer
+    && last.byteOffset === first.byteOffset + (rows.length - 1) * bytesPerRow
+    && first.byteOffset + rows.length * bytesPerRow <= first.buffer.byteLength
+  const flat = contiguous ? new Uint32Array(first.buffer, first.byteOffset, rows.length * wordsPerRow) : null
+  const scratchU32 = flat ? null : new Uint32Array(wordsPerRow)
   const scratchBytes = scratchU32 ? new Uint8Array(scratchU32.buffer) : null
 
   for (let i = 0; i < rows.length; i += 1) {

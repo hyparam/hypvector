@@ -20,7 +20,7 @@ Each parameter below has a current state, a target strategy, and the experiments
 | `dimension` | required | **Required** | Caller's model dictates this. No automation possible. |
 | `metric` | `'cosine'` default, in KV | **KV-metadata** (done) | Defaults to `'cosine'`, stored in KV, read transparently at search. |
 | `normalize` | **default `true` (shipped)** | **KV-metadata, default `true`** | Cosine + normalized = dot, which dominates everywhere. Every benchmark ran normalized with no downside. Code default flipped to `true`; callers can omit it. Harmless if already unit-length. Kept as a flag (not forced) because `dot`/`euclidean` are magnitude-sensitive and would silently break if always normalized. |
-| `binary` | **Auto (shipped)** | **Derive(N): on at N ≥ 10k** | Shipped: auto-on at `defaultAutoBinaryThreshold = 10000` (~1.5% extra bytes for ~50× fewer bytes-read in phase 2). Below threshold, exact scan is fine. Small-N crossover still unmeasured (see open experiments). |
+| `binary` | **Auto (shipped)** | **Derive(N): on at N ≥ 10k** | Shipped: auto-on at `defaultAutoBinaryThreshold = 10000`. Small-N crossover now measured (`validate-params.js smalln`): binary-rerank is *slower* than exact scan below ~5k (0.76–0.80×) and only a clear win at 10k (1.07×) and 20k (1.30×). Column overhead is **~3.2% at 384-dim** (48 binary bytes / 1536 float bytes), not the ~1.5% guessed here. The 10k threshold is well-placed: it's where binary turns net-positive *and* where clustering (its real payoff) kicks in. |
 | `clusters` | **Auto (shipped)** | **Derive(N): `round(√N/2)`** | Shipped: `round(√N/2)` when binary auto-on (`writeVectors.js`). The sweep below locked in `√N/2` over `√N` (better latency, same recall on both corpora). Caller can still pass an explicit count or `0`. |
 | `clusterIterations` | `6` | **Fixed (6)** | The existing ablations show diminishing returns past 6. Hide the knob. |
 | `clusterSeed` | `1` | **Fixed (1)** | Determinism is the only reason this exists. No reason to expose. |
@@ -144,11 +144,38 @@ The disagreement on `probe` is the most interesting finding: LLM-log retrievals 
 - `probe` search default: stays at `0.25`. The LLM-log data tempted us to drop it; the wiki data showed why we shouldn't.
 - `rerankFactor` search default: stays at `10`. The `N/3000` rule moves into the documentation as "raise this if you observe sub-target recall", not as a default.
 
-### Still-open experiments
+### Validation pass (2026-06-20)
 
-- Repeat the clusters sweep at 500k and 1M LLM-log row counts to confirm `√N/2` across sizes.
-- Recall@100 to discriminate the LLM-log 94% ceiling.
-- Find the small-N crossover where the binary column stops being worth ~1.5% bytes.
+The three open experiments were run via `scripts/validate-params.js` (subcommands `recall`, `smalln`, `scale`). All three defaults held. One latent bug surfaced and was fixed.
+
+**Bug found while validating (fixed):** the clustered binary scan (`src/search/chunks.js`, `hammingScoreChunk`) built a single flat `Uint32Array` view over a decoded row chunk, assuming all rows are tightly packed in one backing buffer. A clustered row-range read can be assembled from several parquet pages, so on some queries that view ran past the buffer end (`RangeError`) or, when the first buffer was large enough, silently scored the wrong bytes. Now the fast path is gated on an O(1) contiguity check (last row's buffer + offset + bounds), falling back to a per-row scratch copy otherwise. Regression test in `test/chunks.test.js`. The wiki sweep below reproduces the plan's pre-bug numbers exactly; the LLM-log sweep shifted (see below), consistent with the fix only touching the non-contiguous chunks LLM-log clustering produced.
+
+**1. Recall@100 on LLM-log (`recall` mode, 100k × 384).** The recall@10 ceiling (~89–90%) is flat across all cluster counts — top-10 is saturated by near-duplicate messages, so it can't discriminate. recall@100 *does* discriminate and stays healthy:
+
+| clusters | ms | recall@10 | recall@100 |
+|---:|---:|---:|---:|
+| 0 | 214 | 89.5% | 94.3% |
+| 158 (√N/2) | 41 | 89.0% | 95.7% |
+| 316 (√N) | 40 | 89.0% | 96.8% |
+| 632 (2√N) | 46 | 89.0% | 97.0% |
+
+More clusters buy ~1pp recall@100 per step, but √N/2 is fastest and within ~1pp of √N. The 94% "ceiling" was a recall@10 artifact, not an index limit — recall@100 reaches 95–97%. **√N/2 holds.**
+
+**2. Small-N binary crossover (`smalln` mode, LLM-log subsets, 384-dim).** Binary column overhead is a flat ~3.2%. Binary-rerank vs exact scan: 500–2k → 0.76–0.80× (slower) at 99.5% recall; 5k → 1.01× / 97%; 10k → 1.07× / 96.5%; 20k → 1.30× / 96.5%. Crossover is ~5k; binary becomes a clear win at 10k. **The 10k auto-on threshold holds** (and is where clustering, the bigger lever, also turns on). The crossover is dimension-driven (Hamming vs float scan cost), so it generalizes across 384-dim corpora.
+
+**3. Clusters √N/2 at scale (`scale` mode).** LLM-log only has 51,389 raw messages, so a 500k/1M LLM-log corpus isn't available. Substituted the 1M × 1024-dim `tpuf-bench` corpus (different distribution and dimension — a stronger generalization test of the formula's constant). Probe/rerank at defaults, recall@10 vs exact full scan:
+
+| N (dim) | √N/2 | √N |
+|---|---|---|
+| 100k (384) | 8.4 ms / 89% | 9.4 ms / 89% |
+| 500k (1024) | 49.8 ms / 89.5% | 49.3 ms / 90.5% |
+| 1M (1024) | 72.8 ms / 92.5% | 76.4 ms / 93.5% |
+
+`√N/2` is fastest-or-tied on latency at every size and reads fewer fetches; `√N` consistently buys ~1pp recall for more bandwidth. At 1024-dim the latency gap narrows (phase-2 float fetches dominate, so cluster count matters less for wall-time) but `√N/2` never loses. **`√N/2` holds across sizes and across a different dimension/distribution.** (The `2√N` point at 1M was skipped — its k-means write exceeded 20 min and `√N/2` vs `√N` already answers the question.)
+
+**Re-validated headline sweeps (post-fix):**
+- LLM-log clusters/rerank/probe: √N/2 fastest at equal recall; rf=10 saturated (+0.5pp at rf=30 for +7ms); probe 0.10 ties 0.25 on LLM-log alone.
+- Wiki clusters/rerank/probe: reproduces the plan exactly — probe 0.10 → 84% (−9pp regression), rf=10→30 gains 2pp. **probe=0.25 and rerankFactor=10 confirmed.**
 
 
 ## Product quantization: evaluated, removed
