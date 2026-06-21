@@ -237,7 +237,49 @@ async function runScale() {
   }
 }
 
+// --- probe sweep: absolute count vs fraction across N ---------------------
+// Question (OPTIMIZE.md Experiment D): the default probe is a FRACTION (0.25).
+// IVF theory says recall@10 depends on the ABSOLUTE number of probed lists
+// (~16-32 for 95-99%), roughly independent of N. If true, a fixed fraction
+// over-probes as N grows — spending roundtrips/bytes for recall already had.
+// This sweeps absolute probe counts and the 0.25 fraction at several N, on a
+// file clustered at the shipped default (round(sqrt(N)/2)).
+async function runProbe() {
+  const Ns = (ARG ?? '').split(',').filter(Boolean).map(Number)
+  if (!Ns.length) { console.error('probe needs comma-separated N list'); process.exit(1) }
+  const maxN = Math.max(...Ns)
+  console.log(`probe: loading up to ${maxN.toLocaleString()} from ${SRC}...`)
+  const { records: all, meta } = await loadRecords(SRC, maxN)
+  console.log(`  loaded ${all.length.toLocaleString()} × ${meta.dimension}-dim`)
+  const absProbes = [2, 4, 8, 16, 24, 32, 48]
+  for (const N of Ns) {
+    const records = all.slice(0, N)
+    const clusters = Math.round(Math.sqrt(N) / 2)
+    const queries = pickQueries(records, QUERY_COUNT)
+    const base = `${SRC.replace(/\.parquet$/, '').split('/').pop()}_pb${N}`
+    console.log(`\n=== N=${N.toLocaleString()} clusters=${clusters} (√N/2) ===`)
+    // Reference: exact top-10 on a binary, no-cluster file.
+    const refPath = await writeVariant(`${base}_c0`, records, meta, 0, true)
+    const path = await writeVariant(`${base}_c${clusters}`, records, meta, clusters, true)
+    const ref = await bench(refPath, queries, 10, { rerankFactor: 0 })
+    console.log(`${'probe'.padStart(12)} ${'lists'.padStart(6)} ${'ms'.padStart(7)} ${'fetches'.padStart(8)} ${'MB read'.padStart(9)} ${'recall'.padStart(8)}`)
+    console.log('-'.repeat(56))
+    // Each absolute count, then the shipped 0.25 fraction for comparison.
+    const variants = [
+      ...absProbes.filter(p => p <= clusters).map(p => ({ probe: p, label: String(p) })),
+      { probe: 0.25, label: '0.25 frac' },
+    ]
+    for (const v of variants) {
+      const lists = v.probe > 1 ? Math.min(v.probe, clusters) : Math.max(1, Math.ceil(clusters * v.probe))
+      const r = await bench(path, queries, 10, { probe: v.probe })
+      const rec = recallAt(ref.tops, r.tops, 10)
+      console.log(`${v.label.padStart(12)} ${String(lists).padStart(6)} ${r.ms.toFixed(1).padStart(7)} ${r.fetches.toFixed(0).padStart(8)} ${r.mb.toFixed(2).padStart(9)} ${(rec * 100).toFixed(1).padStart(7)}%`)
+    }
+  }
+}
+
 if (MODE === 'recall') await runRecall()
 else if (MODE === 'smalln') await runSmallN()
 else if (MODE === 'scale') await runScale()
+else if (MODE === 'probe') await runProbe()
 else { console.error(`unknown mode: ${MODE}`); process.exit(1) }

@@ -23,6 +23,21 @@
 
 At 156k 384-dim wiki embeddings (249 MB), a single top-10 query reads **~6 MB across ~160 ranged HTTP fetches** with ~91% recall against an exact full scan. Over a localhost HTTP server with 20 ms of injected per-request latency, the rerank path lands at **~140 ms/query** vs ~360 ms for an exact full scan.
 
+## Benchmarks
+
+Vector search over 3,199,860 OpenAI embeddings (1024-dim) of real LLM conversations ([WildChat-4.8M](https://huggingface.co/datasets/allenai/WildChat-4.8M)), top-10 recall against exact truth. Every competitor was queried over the network, the way it is actually deployed. hypvector keeps the vectors in object storage and runs the query in the client, so there is no server and no idle cost.
+
+| Engine | Storage | Recall@10 | Warm query (p50) | All-in / mo | Server |
+|---|---:|---:|---:|---:|---|
+| **hypvector** | 13.7 GB | 0.925 | 147 ms | **~$0.32** | none |
+| Pinecone | 13.1 GB | 0.920 | 85 ms | $50 min | managed |
+| turbopuffer | 13.1 GB | 0.915 | 198 ms | $64 min | managed |
+| S3 Vectors | 13.1 GB | 0.905 | 133 ms | ~$0.79 | serverless |
+| pgvector | 41.9 GB | 0.870 | 80 ms | $372 | r5.2xlarge 24/7 |
+| Qdrant | 13.1 GB | 0.865 | 70 ms | $186 | r5.xlarge 24/7 |
+
+The managed and always-on engines keep the index hot to answer fast, which is what the monthly bill pays for. hypvector trades a little latency for zero idle cost and no infrastructure.
+
 ## Quick Start
 
 ### Browser Example
