@@ -140,11 +140,31 @@ N=20k–156k) and tpuf (1024-dim, N=250k/1M), clusters at the shipped √N/2:
   Recall knees at ~80 lists (92%). The fraction's last 1pp (92→93%) costs +47
   fetches and +11 MB — ~30% more roundtrips and bytes for marginal recall.
 
-**Recommended change:** `probe = min(ceil(fraction × nlist), cap)` with
-`cap ≈ 80–96`. The cap only binds above ~400k vectors (where 0.25·√N/2 > 80),
-so all current small/medium-N behavior is unchanged; at 1M it trims ~25% of
-roundtrips and ~30% of bytes for ~1pp recall. Backward-compatible, low risk.
-Open question: exact cap value (80 vs 96) and whether it's user-overridable.
+**Implemented:** `probe = min(ceil(fraction × nlist), 96)` (`defaultClusterProbeCap`
+in `constants.js`, applied in `ranges.js`). The cap binds only above ~400k
+vectors (where 0.25·√N/2 > 96); smaller indexes are unchanged. An explicit
+`probe` (fraction or count) bypasses the cap and is honored literally.
+
+**Validated at 3.2M (2026-06-21).** WildChat-4.8M index: 3,199,860 × 1024-dim,
+894 clusters (√N/2), cluster sizes 380–26,122 (mean 3,579). 10 queries, exact
+brute-force reference. recall@10 is **flat at 92.0% from 48 to 320 probed
+lists** — it saturates by ~48 lists; probing more does nothing for top-10:
+
+  | lists | fetches | MB | r@10 | r@100 |
+  |------:|--------:|---:|-----:|------:|
+  | 48 | 274 | 68 | 92.0% | 86.4% |
+  | **96 (cap, default)** | **347** | **89** | **92.0%** | **88.0%** |
+  | 224 (=0.25, uncapped) | 500 | 146 | 92.0% | 89.7% |
+  | 320 | 599 | 190 | 92.0% | 89.8% |
+
+  So at 3.2M the cap costs **0 pp of recall@10** vs the uncapped 0.25 fraction
+  while cutting ~30% of fetches, ~40% of bytes, and ~54% of latency (513 vs
+  1038 ms). recall@100 rises slightly with more probes (a top-100 workload
+  could raise probe explicitly), but for the default top-10 the cap is correct
+  and even conservative — 48 lists would already serve top-10. Keeping 96
+  because at 1M the recall@10 knee is higher (~80–96 lists); 96 serves both
+  scales. **Conclusion: cap appropriate; √N/2 cluster heuristic also confirmed
+  at 3.2M.** (Caveat: 10 queries → coarse r@10 granularity; trend is clear.)
 
 ---
 

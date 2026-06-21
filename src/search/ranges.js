@@ -1,5 +1,5 @@
 import { hammingDistanceBytes } from '../cluster.js'
-import { defaultClusterProbeFraction } from '../constants.js'
+import { defaultClusterProbeCap, defaultClusterProbeFraction } from '../constants.js'
 
 /**
  * @import { HypVectorMetadata } from '../types.js'
@@ -36,9 +36,13 @@ export function selectClusterRowRanges(meta, queryBin, probe) {
   const probeFraction = probe === undefined ? defaultClusterProbeFraction : probe
   // probe in (0, 1] is a fraction of clusters (1.0 = all clusters);
   // probe > 1 is an absolute count.
-  const targetClusters = probeFraction > 1
+  let targetClusters = probeFraction > 1
     ? Math.min(Math.ceil(probeFraction), centroids.length)
     : Math.max(1, Math.ceil(centroids.length * probeFraction))
+  // The default fraction over-probes at large nlist (recall knees well before
+  // 0.25 x nlist), so cap the *default* to bound roundtrips/bytes at scale.
+  // An explicit `probe` — fraction or count — is taken literally.
+  if (probe === undefined) targetClusters = Math.min(targetClusters, defaultClusterProbeCap)
 
   const wanted = clusterDist.slice(0, targetClusters).map(c => c.cluster).sort((a, b) => a - b)
   /** @type {{ rowStart: number, rowEnd: number }[]} */

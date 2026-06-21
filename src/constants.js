@@ -30,6 +30,14 @@ export const defaultClusterIterations = 6
 // file has cluster metadata. Lower = faster but lower recall.
 export const defaultClusterProbeFraction = 0.25
 
+// Upper bound on clusters probed under the *default* fraction. Clusters grow
+// as ~sqrt(N)/2, so 0.25 x nlist keeps rising with N; measured recall knees
+// well before that at scale (~92% at 80-96 lists on 1M x 1024, vs 93% at the
+// uncapped 125). Capping the default trims ~25% of roundtrips and ~30% of
+// bytes above ~400k vectors for ~1pp recall. Only applies when `probe` is
+// left default; an explicit `probe` is honored literally.
+export const defaultClusterProbeCap = 96
+
 // When `binary` is not specified at write time, the column is added once
 // the corpus is at least this large. Below the threshold, exact full scan
 // is fast enough that the rerank path's overhead isn't worth the column.

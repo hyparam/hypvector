@@ -88,7 +88,9 @@ export interface SearchVectorsOptions {
    * actually scans. Can be expressed as:
    *   - an integer >= 1 (number of clusters)
    *   - a float in (0, 1] (fraction of total clusters)
-   * Lower values are faster but reduce recall. Default: 0.25 (scan 25% of clusters).
+   * Lower values are faster but reduce recall. Default: 0.25 (scan 25% of
+   * clusters), capped at an absolute ceiling so large indexes don't over-probe;
+   * the cap applies only to the default — an explicit value is honored as-is.
    * Ignored when the file has no centroids.
    */
   probe?: number

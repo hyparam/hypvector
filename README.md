@@ -31,7 +31,7 @@ Vector search over 3,199,860 OpenAI embeddings (1024-dim) of real LLM conversati
 |---|---:|---:|---:|---:|---|
 | **hypvector** | 13.7 GB | 0.925 | 147 ms | **~$0.32** | none |
 | Pinecone | 13.1 GB | 0.920 | 85 ms | $50 min | managed |
-| turbopuffer | 13.1 GB | 0.915 | 198 ms | $64 min | managed |
+| turbopuffer | 13.1 GB | 0.915 | 198 ms | $16 min | managed |
 | S3 Vectors | 13.1 GB | 0.905 | 133 ms | ~$0.79 | serverless |
 | pgvector | 41.9 GB | 0.870 | 80 ms | $372 | r5.2xlarge 24/7 |
 | Qdrant | 13.1 GB | 0.865 | 70 ms | $186 | r5.xlarge 24/7 |
@@ -252,7 +252,7 @@ Vector search over 837,989 real LLM conversations ([WildChat-1M](https://hugging
 | **hypvector** | 3.58 GB | 0.975 | 46 ms <sup>†</sup> | **~$0.08** | none |
 | pgvector | 11.5 GB | 0.965 | ~1 ms <sup>†</sup> | $94 | r5.large 24/7 |
 | Qdrant | 3.6 GB | 0.965 | 2 ms <sup>†</sup> | $62 | t3.large 24/7 |
-| turbopuffer | 3.43 GB | 0.93 | 60 ms <sup>‡</sup> | $64 min | managed |
+| turbopuffer | 3.43 GB | 0.93 | 60 ms <sup>‡</sup> | $16 min | managed |
 | Pinecone | 3.43 GB | 0.97 | 125 ms <sup>‡</sup> | $50 min | managed |
 
 <sup>†</sup> local compute, no network. <sup>‡</sup> live cloud, includes real internet round-trip.
@@ -306,7 +306,7 @@ hypvector isn't a hosted service. The closest peers are:
 |---|---|---:|---:|---:|
 | **hypvector** | none, file on S3 | ~500 ms (CloudFront, home WAN) | same, no cache | $0 |
 | **LanceDB** (S3 mode) | none, embedded | bandwidth-bound | sub-50 ms (local) | $0 |
-| **turbopuffer** | hosted | ~440 ms p90 | ~8 ms | $64 min |
+| **turbopuffer** | hosted | ~440 ms p90 | ~8 ms | $16 min |
 | **Pinecone Serverless** | hosted | 200 ms – 2 s | 50–100 ms | $0 + per-RU |
 | **Cloudflare Vectorize** | hosted (edge) | needs pre-warm | edge-fast | $0 + per-op |
 
