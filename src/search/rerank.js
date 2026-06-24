@@ -118,7 +118,9 @@ export async function searchRerank({ file, metadata, meta, queryF32, scoringMetr
   }))
 
   const dir = reportedMetric === 'euclidean' ? 1 : -1
-  scored.sort((a, b) => dir * (a.score - b.score))
+  // Tie-break by rowIndex so the winners are independent of the order the
+  // parallel candidate reads completed in (deterministic results).
+  scored.sort((a, b) => dir * (a.score - b.score) || a.rowIndex - b.rowIndex)
   const winners = scored.slice(0, topK)
 
   // Phase 3: fetch ids for just the top-K winners.
