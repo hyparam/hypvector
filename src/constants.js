@@ -31,12 +31,19 @@ export const defaultClusterIterations = 6
 export const defaultClusterProbeFraction = 0.25
 
 // Upper bound on clusters probed under the *default* fraction. Clusters grow
-// as ~sqrt(N)/2, so 0.25 x nlist keeps rising with N; measured recall knees
-// well before that at scale (~92% at 80-96 lists on 1M x 1024, vs 93% at the
-// uncapped 125). Capping the default trims ~25% of roundtrips and ~30% of
-// bytes above ~400k vectors for ~1pp recall. Only applies when `probe` is
-// left default; an explicit `probe` is honored literally.
-export const defaultClusterProbeCap = 96
+// as ~sqrt(N)/2, so 0.25 x nlist keeps rising with N, but the clusters needed
+// to reach the recall ceiling stay roughly flat (~25-45) regardless of N. A
+// WildChat 1024-dim sweep found 48, 72, and 96 lists give statistically
+// indistinguishable recall@10 at 1M and 3.2M (within ~1pp over 20 exact-scan
+// queries, no consistent direction). Their top-10 sets are not bit-identical:
+// over 200 queries, cap 48 matches cap 96 on ~93% (1M) to ~97% (3.2M), the
+// rest reshuffling near-ties at the list boundary, not losing true neighbors.
+// Capping at 48 reads ~42% fewer bytes than 96 at scale with no measurable
+// recall loss; structurally, shrinking the cap can only lose recall, never
+// gain it, since probed clusters are a subset. Residual misses are a
+// rerankFactor limit, not a probe limit. Only applies when `probe` is left
+// default; an explicit `probe` is honored literally.
+export const defaultClusterProbeCap = 48
 
 // When `binary` is not specified at write time, the column is added once
 // the corpus is at least this large. Below the threshold, exact full scan

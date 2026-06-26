@@ -38,7 +38,7 @@ describe('selectClusterRowRanges probe cap', () => {
   const query = Uint8Array.from([0, 0])
 
   it('caps the default fraction at the absolute ceiling for large nlist', () => {
-    // 0.25 * 500 = 125 clusters, but the default cap (96) should bind.
+    // 0.25 * 500 = 125 clusters, but the default cap should bind.
     const ranges = selectClusterRowRanges(makeMeta(500), query, undefined)
     expect(rowsCovered(ranges)).toBe(defaultClusterProbeCap)
   })

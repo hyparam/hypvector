@@ -50,10 +50,10 @@
     "hyparquet-writer": "0.16.1"
   },
   "devDependencies": {
-    "@types/node": "26.0.0",
+    "@types/node": "26.0.1",
     "@vitest/coverage-v8": "4.1.9",
     "eslint": "9.39.4",
-    "eslint-plugin-jsdoc": "63.0.7",
+    "eslint-plugin-jsdoc": "63.0.8",
     "typescript": "6.0.3",
     "vitest": "4.1.9"
   }
