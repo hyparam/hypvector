@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.1]
+ - Search results are now deterministic: ties on score are broken by row index, so repeated queries return the same ordering
+ - Lower the default cluster `probe` cap from 96 to 48 lists; an explicit `probe` still bypasses the cap
+
 ## [0.2.0]
  - `searchVectors` accepts arrays for `source`, `metadata`, and `binary` to query across multiple parquet files in one call; results are heap-merged into a global top-K and each carries a `sourceIndex`. Single-source callers are unchanged
  - `writeVectors` auto-tunes `binary` and `clusters` from the input size: binary turns on at N >= 10000 and `clusters` defaults to round(sqrt(N)/2) when both are left unset. Passing either flag explicitly opts out of that knob's auto behavior
